@@ -66,7 +66,7 @@
           send({ action: 'unregisterReader', token, threadId: active.threadId }).catch(() => {});
           return;
         }
-        if (!response?.ok) throw new Error('Registration failed');
+        if (!response?.ok) throw new Error('Impossible d’autoriser le lecteur.');
         const query = new URLSearchParams({ threadId: active.threadId, token, origin: location.origin });
         frame.src = chrome.runtime.getURL(`panel.html?${query}`);
       }).catch(() => {

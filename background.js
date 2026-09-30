@@ -32,7 +32,7 @@ async function removeReaders(predicate) {
   if (keys.length) await chrome.storage.session.remove(keys);
 }
 
-chrome.runtime.onInstalled.addListener(() => initializeStorage().catch(console.error));
+chrome.runtime.onInstalled.addListener(() => initializeStorage().catch((error) => console.error('Reddit Distill : impossible d’initialiser le stockage.', error)));
 
 // Tokens alone are insufficient: Reddit can observe iframe postMessage events.
 // A challenge must travel through the exact iframe in the content script's
@@ -93,7 +93,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
   return true;
 });
 
-chrome.tabs.onRemoved.addListener((tabId) => removeReaders((value) => value.tabId === tabId).catch(console.error));
+chrome.tabs.onRemoved.addListener((tabId) => removeReaders((value) => value.tabId === tabId).catch((error) => console.error('Reddit Distill : impossible de nettoyer les sessions du lecteur.', error)));
 chrome.action.onClicked.addListener(async (tab) => {
   if (!Number.isInteger(tab.id) || !tab.url || !redditThread(new URL(tab.url))) return;
   try { await chrome.tabs.sendMessage(tab.id, { action: 'openReader' }, { frameId: 0 }); }

@@ -16,4 +16,4 @@ for (const file of await readdir('.')) {
   for (const match of source.matchAll(/from\s+['"]\.\/(.*?)['"]/g)) await access(match[1]);
   assert(!/news\.ycombinator\.com|hacker-news\.firebaseio|hn\.algolia/.test(source), `${file}: old HN endpoint`);
 }
-console.log('Manifest, permissions, extension resources, imports and JavaScript syntax: OK');
+console.log('Manifeste, autorisations, ressources, imports et syntaxe JavaScript : OK');
