@@ -113,13 +113,38 @@ test('leaving a thread revokes the session and prevents later snapshot access', 
   assert.equal((await app.send('readPageSnapshot', app.panel)).ok, false);
 });
 
-function contentHarness(initialURL = URL_REDDIT) {
+test('Reddit transport relays only constrained requests from the authorized iframe', async () => {
+  const app = backgroundHarness();
+  await app.authorize();
+  app.chrome.tabs.sendMessage = async (...args) => { app.calls.push(args); return { ok: true, data: { reddit: true } }; };
+  const request = { kind: 'thread', commentId: 'abc123' };
+  assert.deepEqual(await app.send('fetchRedditJson', app.panel, { requestId: 'request-1', request }), { ok: true, data: { reddit: true } });
+  assert.deepEqual(JSON.parse(JSON.stringify(app.calls[0])), [17,
+    { action: 'fetchRedditJson', token: TOKEN, threadId: THREAD, requestId: 'request-1', request },
+    { frameId: 0, documentId: 'reddit-document' },
+  ]);
+  for (const badRequest of [{ kind: 'url', url: 'https://evil.test' }, { kind: 'thread', commentId: '../other' },
+    { kind: 'thread', commentId: 123 }, { kind: 'more', children: [] }, { kind: 'more', children: ['abc', 'x&url=evil'] },
+    { kind: 'more', children: Array(101).fill('abc') }]) {
+    assert.equal((await app.send('fetchRedditJson', app.panel, { requestId: 'request-2', request: badRequest })).ok, false);
+  }
+  for (const action of ['fetchRedditJson', 'collectPageComments', 'cancelRedditRequest']) {
+    assert.equal((await app.send(action, { ...app.panel, documentId: 'impostor' }, { requestId: 'request-2', request })).ok, false);
+    assert.equal((await app.send(action, app.panel, { requestId: '../invalid', request })).ok, false);
+  }
+  assert.equal(app.calls.length, 1);
+});
+
+function contentHarness(initialURL = URL_REDDIT, options = {}) {
   let listener;
   let interval;
   const messages = [];
   const posts = [];
   const windowEvents = {};
   const elements = [];
+  const fetches = [];
+  const timers = new Map();
+  let timerId = 0;
   const location = new URL(initialURL);
   const document = { activeElement: null };
   class Element {
@@ -144,8 +169,11 @@ function contentHarness(initialURL = URL_REDDIT) {
   } };
   vm.runInNewContext(contentSource, {
     window: { addEventListener(name, fn) { windowEvents[name] = fn; } }, document, chrome, location, URL, URLSearchParams, crypto: webcrypto,
-    setTimeout: (fn) => fn(), setInterval: (fn) => { interval = fn; }, MutationObserver: class { observe() {} },
+    AbortController, fetch: (url, init) => { fetches.push({ url, init }); return options.fetch?.(url, init) || Promise.resolve({ ok: true, json: async () => ({ comments: [] }) }); },
+    setTimeout: (fn, ms) => { const id = ++timerId; timers.set(id, { fn, ms }); return id; },
+    clearTimeout: (id) => timers.delete(id), setInterval: (fn) => { interval = fn; }, MutationObserver: class { observe() {} },
     RedditDistillDOM: { extractThread: () => ({ id: THREAD, comments: [] }) },
+    RedditDistillLoader: { collect: options.collect || (async () => ({ id: THREAD, comments: [] })) },
   });
   const message = (data) => new Promise((resolve) => listener(data, { id: EXTENSION_ID }, (result) => resolve(structuredClone(result))));
   const open = async () => { await message({ action: 'openReader' }); await flush(); };
@@ -155,7 +183,8 @@ function contentHarness(initialURL = URL_REDDIT) {
     windowEvents.message({ isTrusted: true, source: frame().contentWindow, origin: EXTENSION_ORIGIN, data: { action: 'authorize', token: registration().token, challenge: TOKEN } });
     await flush();
   }
-  return { document, elements, messages, posts, windowEvents, location, message, open, frame, registration, authorize, sync: () => interval() };
+  return { document, elements, messages, posts, windowEvents, location, message, open, frame, registration, authorize,
+    fetches, timers, sync: () => interval() };
 }
 
 test('page-script FAB clicks cannot open a reader; trusted user clicks can', async () => {
@@ -211,4 +240,131 @@ test('content accepts only trusted messages from its exact iframe and verifies s
   assert.equal(app.posts.at(-1)[0].action, 'closed');
   await app.open();
   assert.equal(app.messages.filter((msg) => msg.action === 'registerReader').length, 1);
+});
+
+test('JSON requests use the active Reddit origin, canonical thread path, and session cookies', async () => {
+  const app = contentHarness('https://old.reddit.com/r/ExperiencedDevs/comments/1wo8160/example/abc123/');
+  await app.open(); await app.authorize();
+  const credentials = { token: app.registration().token, threadId: THREAD };
+  assert.equal((await app.message({ action: 'fetchRedditJson', ...credentials, requestId: 'json-1',
+    request: { kind: 'thread', commentId: 'xyz789' } })).ok, true);
+  const initial = app.fetches[0];
+  const url = new URL(initial.url);
+  assert.equal(url.origin, 'https://old.reddit.com');
+  assert.equal(url.pathname, '/r/ExperiencedDevs/comments/1wo8160/example.json');
+  assert.equal(url.searchParams.get('comment'), 'xyz789');
+  assert.equal(url.searchParams.get('context'), '0');
+  assert.equal(initial.init.credentials, 'include');
+  assert.equal(initial.init.mode, 'same-origin');
+  assert.equal((await app.message({ action: 'fetchRedditJson', ...credentials, requestId: 'json-2',
+    request: { kind: 'more', children: ['abc', 'def', 'abc'] } })).ok, true);
+  const more = new URL(app.fetches[1].url);
+  assert.equal(more.pathname, '/api/morechildren.json');
+  assert.equal(more.searchParams.get('link_id'), THREAD);
+  assert.equal(more.searchParams.get('children'), 'abc,def');
+  assert.equal(app.timers.size, 0);
+});
+
+test('content refuses forged, off-thread, and malformed JSON requests before fetching', async () => {
+  const app = contentHarness();
+  await app.open(); await app.authorize();
+  const message = { action: 'fetchRedditJson', token: app.registration().token, threadId: THREAD,
+    requestId: 'json-1', request: { kind: 'thread' } };
+  for (const extra of [{ token: TOKEN }, { threadId: 't3_other' }, { requestId: '' },
+    { request: { kind: 'url', url: 'https://evil.test' } }, { request: { kind: 'more', children: ['../abc'] } }]) {
+    assert.equal((await app.message({ ...message, ...extra })).ok, false);
+  }
+  assert.equal(app.fetches.length, 0);
+  assert.equal(app.timers.size, 0);
+});
+
+test('HTTP failures preserve status and cooldown for fallback and retry decisions', async () => {
+  const app = contentHarness(URL_REDDIT, { fetch: async () => ({ ok: false, status: 429, headers: new Headers({ 'Retry-After': '4' }) }) });
+  await app.open(); await app.authorize();
+  const result = await app.message({ action: 'fetchRedditJson', token: app.registration().token, threadId: THREAD,
+    requestId: 'rate-limited', request: { kind: 'thread' } });
+  assert.equal(result.ok, false);
+  assert.equal(result.status, 429);
+  assert.equal(result.retryAfter, '4');
+  assert.match(result.error, /temporairement/);
+});
+
+function fetchUntilAborted(_url, { signal }) {
+  return new Promise((_resolve, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }));
+}
+
+test('cancel, dialog close, SPA navigation, and timeout abort same-origin requests', async () => {
+  for (const reason of ['cancel', 'close', 'navigate', 'timeout']) {
+    const app = contentHarness(URL_REDDIT, { fetch: fetchUntilAborted });
+    await app.open(); await app.authorize();
+    const credentials = { token: app.registration().token, threadId: THREAD, requestId: 'pending-json' };
+    const pending = app.message({ action: 'fetchRedditJson', ...credentials, request: { kind: 'thread' } });
+    assert.equal(app.fetches.length, 1);
+    assert.equal((await app.message({ action: 'fetchRedditJson', ...credentials, request: { kind: 'thread' } })).ok, false);
+    if (reason === 'cancel') assert.equal((await app.message({ action: 'cancelRedditRequest', ...credentials })).ok, true);
+    else if (reason === 'close') app.windowEvents.message({ isTrusted: true, source: app.frame().contentWindow,
+      origin: EXTENSION_ORIGIN, data: { action: 'close', token: credentials.token } });
+    else if (reason === 'navigate') { app.location.href = 'https://www.reddit.com/comments/another/example/'; app.sync(); }
+    else [...app.timers.values()].find((timer) => timer.ms === 20_000).fn();
+    const result = await pending;
+    assert.equal(result.ok, false, reason);
+    assert.equal(result.aborted, true, reason);
+    assert.equal(app.fetches[0].init.signal.aborted, true, reason);
+    assert.equal(app.timers.size, 0, reason);
+    assert.match(result.error, reason === 'timeout' ? /trop de temps/ : /annulé/);
+  }
+});
+
+test('automatic collection forwards progress and verifies the returned thread', async () => {
+  const app = contentHarness(URL_REDDIT, { collect: async ({ threadId, signal, onProgress }) => {
+    assert.equal(threadId, THREAD); assert.equal(signal.aborted, false);
+    onProgress({ loaded: 52, expanded: 8 });
+    return { id: THREAD, comments: [{ id: 't1_abc' }] };
+  } });
+  await app.open(); await app.authorize();
+  const result = await app.message({ action: 'collectPageComments', token: app.registration().token,
+    threadId: THREAD, requestId: 'collection-1' });
+  assert.equal(result.ok, true);
+  assert.equal(result.thread.comments.length, 1);
+  const [progress, origin] = app.posts.find(([message]) => message.action === 'pageCollectionProgress');
+  assert.equal(origin, EXTENSION_ORIGIN);
+  assert.equal(progress.token, app.registration().token);
+  assert.equal(progress.threadId, THREAD);
+  assert.equal(progress.requestId, 'collection-1');
+  assert.equal(progress.progress.loaded, 52);
+  assert.equal(app.messages.some((message) => message.action === 'pageCollectionProgress'), false);
+  assert.equal(app.timers.size, 0);
+});
+
+test('collection cannot publish stale progress after cancellation or navigation', async () => {
+  for (const action of ['cancel', 'navigate']) {
+    let report;
+    const app = contentHarness(URL_REDDIT, { collect: ({ signal, onProgress }) => {
+      report = onProgress;
+      onProgress({ loaded: 2 });
+      return fetchUntilAborted('', { signal });
+    } });
+    await app.open(); await app.authorize();
+    const credentials = { token: app.registration().token, threadId: THREAD, requestId: 'collect-stale' };
+    const pending = app.message({ action: 'collectPageComments', ...credentials });
+    if (action === 'cancel') await app.message({ action: 'cancelRedditRequest', ...credentials });
+    else { app.location.href = 'https://www.reddit.com/comments/another/example/'; app.sync(); }
+    report({ loaded: 99 });
+    assert.equal((await pending).aborted, true);
+    const progress = app.posts.filter(([message]) => message.action === 'pageCollectionProgress');
+    assert.equal(progress.length, 1);
+    assert.equal(progress[0][0].progress.loaded, 2);
+    assert.equal(progress[0][1], EXTENSION_ORIGIN);
+  }
+});
+
+test('cancellation arriving before the initial request prevents a late fetch', async () => {
+  const app = contentHarness();
+  await app.open(); await app.authorize();
+  const credentials = { token: app.registration().token, threadId: THREAD, requestId: 'cancel-first' };
+  assert.equal((await app.message({ action: 'cancelRedditRequest', ...credentials })).ok, true);
+  const result = await app.message({ action: 'fetchRedditJson', ...credentials, request: { kind: 'thread' } });
+  assert.equal(result.ok, false);
+  assert.equal(result.aborted, true);
+  assert.equal(app.fetches.length, 0);
 });

@@ -4,6 +4,8 @@ const REDDIT_HOSTS = new Set(['reddit.com', 'www.reddit.com', 'old.reddit.com', 
 const READER_TTL = 86_400_000;
 const CHALLENGE_TTL = 30_000;
 const TOKEN = /^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i;
+const REQUEST_ID = /^[a-zA-Z0-9_-]{1,80}$/;
+const COMMENT_ID = /^[a-z0-9]{1,32}$/;
 const extensionURL = new URL(chrome.runtime.getURL(''));
 
 function redditThread(url) {
@@ -22,6 +24,14 @@ function samePanel(record, sender) {
   return record.frameId === sender.frameId && record.panelDocumentId === sender.documentId;
 }
 
+function validRedditRequest(request) {
+  if (!request || typeof request !== 'object') return false;
+  if (request.kind === 'thread') return request.commentId === undefined ||
+    (typeof request.commentId === 'string' && COMMENT_ID.test(request.commentId));
+  return request.kind === 'more' && Array.isArray(request.children) && request.children.length > 0 &&
+    request.children.length <= 100 && request.children.every((id) => typeof id === 'string' && COMMENT_ID.test(id));
+}
+
 async function removeReaders(predicate) {
   const all = await chrome.storage.session.get(null);
   const tokens = new Set(Object.entries(all).filter(([key, value]) => key.startsWith('reader:') && predicate(value)).map(([key]) => key.slice(7)));
@@ -38,7 +48,8 @@ chrome.runtime.onInstalled.addListener(() => initializeStorage().catch((error) =
 // A challenge must travel through the exact iframe in the content script's
 // closed shadow root before that frame may access a page snapshot or settings.
 chrome.runtime.onMessage.addListener((message, sender, respond) => {
-  if (!['registerReader', 'validateReader', 'authorizeReader', 'unregisterReader', 'readPageSnapshot'].includes(message?.action)) return;
+  if (!['registerReader', 'validateReader', 'authorizeReader', 'unregisterReader', 'readPageSnapshot',
+    'fetchRedditJson', 'collectPageComments', 'cancelRedditRequest'].includes(message?.action)) return;
   (async () => {
     if (sender.id !== chrome.runtime.id || !Number.isInteger(sender.tab?.id) ||
         !sender.documentId || !TOKEN.test(message.token || '') || !/^t3_[a-z0-9]+$/.test(message.threadId || '')) return { ok: false };
@@ -85,6 +96,17 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
       return { ok: true, origin: record.origin, challenge };
     }
     if (!samePanel(record, sender)) return { ok: false };
+    if (['fetchRedditJson', 'collectPageComments', 'cancelRedditRequest'].includes(message.action)) {
+      if (typeof message.requestId !== 'string' || !REQUEST_ID.test(message.requestId) ||
+          (message.action === 'fetchRedditJson' && !validRedditRequest(message.request))) return { ok: false, error: 'Requête Reddit invalide.' };
+      const result = await chrome.tabs.sendMessage(record.tabId, {
+        action: message.action, token: message.token, threadId: record.threadId, requestId: message.requestId,
+        ...(message.action === 'fetchRedditJson' ? { request: message.request } : {}),
+      }, { frameId: 0, documentId: record.documentId });
+      if (message.action === 'collectPageComments' && result?.ok && result.thread?.id !== record.threadId)
+        return { ok: false, error: 'La discussion Reddit a changé. Rouvre Distill.' };
+      return result || { ok: false, error: 'Impossible de joindre la discussion Reddit.' };
+    }
     const snapshot = await chrome.tabs.sendMessage(record.tabId, {
       action: 'readPageSnapshot', token: message.token, threadId: record.threadId,
     }, { frameId: 0, documentId: record.documentId });

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Reddit Distill",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "minimum_chrome_version": "120",
   "description": "Comprendre les discussions Reddit : arguments, objections, questions-réponses et sources.",
 
@@ -26,7 +26,7 @@
 
   "content_scripts": [{
     "matches": ["https://www.reddit.com/*", "https://old.reddit.com/*", "https://new.reddit.com/*", "https://reddit.com/*"],
-    "js": ["reddit-dom.js", "content.js"],
+    "js": ["reddit-dom.js", "reddit-loader.js", "content.js"],
     "css": ["content.css"],
     "run_at": "document_idle"
   }],

@@ -83,8 +83,9 @@ test('uses the exact page snapshot on API block and marks it partial', async (t)
   assert.equal(thread.coverage.source, 'page');
   assert.equal(thread.coverage.complete, false);
   assert.equal(thread.coverage.loaded, 1);
-  assert.match(thread.coverage.reason, /HTTP 403/);
-  await assert.rejects(fetchThread('post1', { getSnapshot: async () => ({ ...page, id: 't3_other' }) }), /Ouvre la discussion/);
+  assert.match(thread.coverage.reason, /collecte automatique/);
+  assert.doesNotMatch(thread.coverage.reason, /Déplie|HTTP 403/);
+  await assert.rejects(fetchThread('post1', { getSnapshot: async () => ({ ...page, id: 't3_other' }) }), /chargement automatique/);
 });
 
 test('keeps API comments when a later expansion fails, merging page-only comments', async (t) => {
@@ -148,5 +149,78 @@ test('UTF-8 partitions preserve mixed emoji/CJK text and fit the complete JSON b
   for (const record of records) {
     assert.ok(!/[\uD800-\uDBFF]$/.test(record.text), 'no dangling high surrogate');
     assert.ok(!/^[\uDC00-\uDFFF]/.test(record.text), 'no dangling low surrogate');
+  }
+});
+
+test('uses the same-origin page transport for the thread and every morechildren batch', async (t) => {
+  t.mock.method(globalThis, 'fetch', async () => { throw new Error('Extension-origin fetch must not run'); });
+  const requests = [];
+  const thread = await fetchThread('post1', { requestJson: async request => {
+    requests.push(request);
+    return { ok: true, data: request.kind === 'thread' ? listing([comment('first'), more(['second'])], 2)
+      : { json: { errors: [], data: { things: [comment('second', 't1_first')] } } } };
+  } });
+  assert.deepEqual(requests, [{ kind: 'thread' }, { kind: 'more', children: ['second'] }]);
+  assert.equal(thread.comments.length, 2);
+  assert.equal(thread.coverage.complete, true);
+});
+
+test('automatically collects unloaded page replies after API denial instead of requesting manual expansion', async () => {
+  let collected = 0, snapshots = 0;
+  const page = processThreadData(root(2), [comment('first').data, comment('second', 't1_first').data], { source: 'page-auto', complete: true });
+  const thread = await fetchThread('post1', {
+    requestJson: async () => ({ ok: false, status: 403 }),
+    collectComments: async () => { collected++; return page; },
+    getSnapshot: async () => { snapshots++; throw new Error('Manual fallback should not run'); },
+  });
+  assert.equal(collected, 1);
+  assert.equal(snapshots, 0);
+  assert.equal(thread.coverage.complete, true);
+  assert.equal(thread.coverage.loaded, 2);
+  assert.equal(thread.coverage.reason, '');
+});
+
+test('automatic DOM collection merges API comments without hiding a remaining Reddit count gap', async () => {
+  const page = processThreadData(root(4), [comment('second').data], { source: 'page-auto', complete: false, reason: 'Certaines réponses restent inaccessibles.' });
+  const thread = await fetchThread('post1', {
+    requestJson: async () => ({ ok: true, data: listing([comment('first')], 4) }),
+    collectComments: async () => page,
+  });
+  assert.deepEqual(thread.comments.map(c => c.id), ['t1_first', 't1_second']);
+  assert.equal(thread.coverage.complete, false);
+  assert.match(thread.coverage.reason, /2 commentaires.*après la collecte automatique/);
+});
+
+
+test('cyclic API ancestry remains available but cannot be declared complete', async () => {
+  let collections = 0;
+  const thread = await fetchThread('post1', {
+    requestJson: async () => ({ ok: true, data: listing([comment('a', 't1_b'), comment('b', 't1_a')], 2) }),
+    collectComments: async () => { collections++; return null; },
+  });
+  assert.equal(collections, 1);
+  assert.equal(thread.comments.length, 2);
+  assert.equal(thread.coverage.complete, false);
+});
+
+test('automatic page coverage cannot override cyclic ancestry after API merge', async () => {
+  const page = processThreadData(root(2), [comment('a').data, comment('b', 't1_a').data], { source: 'page-auto', complete: true });
+  const thread = await fetchThread('post1', {
+    requestJson: async () => ({ ok: true, data: listing([comment('a', 't1_b')], 2) }),
+    collectComments: async () => page,
+  });
+  assert.equal(thread.comments.length, 2);
+  assert.equal(thread.coverage.complete, false);
+});
+
+test('page-only complete claims require every ancestor chain to reach the requested post', async () => {
+  for (const records of [[comment('a', 't1_a').data], [comment('a', 't1_missing').data]]) {
+    const page = processThreadData(root(1), records, { source: 'page-auto', complete: true });
+    const thread = await fetchThread('post1', {
+      requestJson: async () => ({ ok: false, status: 403 }),
+      collectComments: async () => page,
+    });
+    assert.equal(thread.comments.length, 1);
+    assert.equal(thread.coverage.complete, false);
   }
 });

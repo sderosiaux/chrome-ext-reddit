@@ -31,7 +31,27 @@ function updateCoverage() {
   $('coverage-title').textContent = `${thread.subreddit ? `r/${thread.subreddit} · ` : ''}${count}${coverage.reported != null ? ` · ${coverage.reported} annoncés` : ''}`;
   $('coverage-description').textContent = coverage.complete
     ? 'Toutes les réponses renvoyées par Reddit ont été parcourues. La discussion peut évoluer.'
-    : `Lecture partielle. ${coverage.reason || 'Certaines réponses ne sont pas accessibles.'} Les notes portent uniquement sur les messages lus.`;
+    : `${coverage.reason || 'Certaines réponses restent inaccessibles après le chargement automatique.'} Les notes portent sur les commentaires récupérés.`;
+}
+const collectionListeners = new Map();
+async function redditRequest(action, signal, { request, onProgress } = {}) {
+  signal.throwIfAborted();
+  const requestId = crypto.randomUUID();
+  if (onProgress) collectionListeners.set(requestId, onProgress);
+  let aborted;
+  const cancellation = new Promise((_, reject) => {
+    aborted = () => {
+      chrome.runtime.sendMessage({ action: 'cancelRedditRequest', token, threadId, requestId }).catch(() => {});
+      reject(signal.reason);
+    };
+    signal.addEventListener('abort', aborted, { once: true });
+  });
+  try {
+    return await Promise.race([cancellation, chrome.runtime.sendMessage({ action, token, threadId, requestId, ...(request ? { request } : {}) })]);
+  } finally {
+    signal.removeEventListener('abort', aborted);
+    collectionListeners.delete(requestId);
+  }
 }
 async function getSnapshot(signal) {
   signal.throwIfAborted();
@@ -69,6 +89,16 @@ async function showView({ refresh = false, retry = false } = {}) {
     if (refresh || !thread) {
       progress('Lecture de la discussion…');
       const fetched = await fetchThread(threadId, { signal, origin: parentOrigin, getSnapshot: () => getSnapshot(signal),
+        requestJson: (request) => redditRequest('fetchRedditJson', signal, { request }),
+        collectComments: async () => {
+          const result = await redditRequest('collectPageComments', signal, { onProgress: (state) => {
+            if (active === job) progress(state?.message || `Chargement automatique · ${state?.loaded || 0} commentaires`);
+          } });
+          signal.throwIfAborted();
+          if (!result?.ok || !result.thread) throw new Error(result?.error || 'Le chargement automatique des réponses a échoué.');
+          return result.thread;
+        },
+        onStatus: (text) => { if (active === job) progress(text); },
         onProgress: (n) => { if (active === job) progress(`Lecture de la discussion · ${n} commentaires`); } });
       stillCurrent(); thread = fetched; retryFetch = false;
     }
@@ -217,6 +247,8 @@ $('copy-button').addEventListener('click', async () => {
 window.addEventListener('pagehide', abort);
 window.addEventListener('message', async (event) => {
   if (!event.isTrusted || event.source !== window.parent || event.origin !== parentOrigin || event.data?.token !== token || !settings) return;
+  if (event.data.action === 'pageCollectionProgress' && event.data.threadId === threadId)
+    collectionListeners.get(event.data.requestId)?.(event.data.progress);
   if (event.data.action === 'opened' && !opened) { opened = true; await showView({ refresh: true }); }
   if (event.data.action === 'closed') { opened = false; abort(); if ($('settings-dialog').open) $('settings-dialog').close(); }
 });

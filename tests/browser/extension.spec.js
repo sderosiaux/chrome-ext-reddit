@@ -42,18 +42,28 @@ const test = base.extend({
   },
 });
 
-async function setup(context, { blocked = false, incomplete = false } = {}) {
+async function setup(context, { blocked = false, incomplete = false, automaticReplies = false, onlyPageRequests = false } = {}) {
   let calls = 0;
   await context.route(/^https:\/\/(www\.|old\.|new\.)?reddit\.com\//, async route => {
     const url = new URL(route.request().url());
     if (url.pathname.includes('.json') || url.pathname.includes('/api/')) {
-      if (blocked) return route.fulfill({ status: 403, body: 'Blocked by Reddit' });
+      if (blocked || (onlyPageRequests && !route.request().frame().url().startsWith('https://www.reddit.com/'))) return route.fulfill({ status: 403, body: 'Blocked by Reddit' });
       const data = url.pathname.includes('morechildren')
         ? { json: { errors: [], data: { things: [comment('b2', 't1_a1', 'Review is useful; preserving skills also matters.', 'bob'), comment('c3', 't3_1wo8160', 'A different perspective.', 'carol')] } } }
         : listing;
       return route.fulfill({ json: data });
     }
-    return route.fulfill({ contentType: 'text/html', body: url.hostname === 'old.reddit.com' ? oldFixture : fixture });
+    let html = url.hostname === 'old.reddit.com' ? oldFixture : fixture;
+    if (automaticReplies) html = html.replace('</body>', `<shreddit-comment-tree post-id="t3_1wo8160">
+      <faceplate-partial src="/svc/shreddit/more-comments/ExperiencedDevs/t3_1wo8160" loading="action">
+      <button type="button" id="load-replies">3 more replies</button></faceplate-partial></shreddit-comment-tree>
+      <script>document.getElementById('load-replies').onclick = function () {
+        const branch = document.createElement('shreddit-comment');
+        branch.setAttribute('thingid', 't1_c3'); branch.setAttribute('parentid', 't1_a1'); branch.setAttribute('author', 'carol');
+        const body = document.createElement('div'); body.slot = 'comment'; body.textContent = 'This reply was automatically discovered.';
+        branch.append(body); this.parentElement.replaceWith(branch);
+      };</script></body>`);
+    return route.fulfill({ contentType: 'text/html', body: html });
   });
   await context.route('https://api.openai.com/v1/responses', async route => {
     calls++;
@@ -112,11 +122,11 @@ test('Reddit 403 falls back to page with persistent partial coverage; light, dar
   await page.goto(THREAD);
   const frame = await openReader(page);
   await frame.getByRole('button', { name: 'Fermer les paramètres' }).click();
-  await expect(frame.locator('#coverage')).toContainText('Lecture partielle');
+  await expect(frame.locator('#coverage')).toContainText(/automatiquement|automatique/);
   await expect(frame.locator('#coverage-title')).toContainText('2 commentaires lus');
   await frame.getByRole('tab', { name: 'Discussion', exact: true }).click();
   await expect(frame.locator('#reader')).toContainText('alice');
-  await expect(frame.locator('#coverage')).toContainText('Lecture partielle');
+  await expect(frame.locator('#coverage')).toContainText(/automatiquement|automatique/);
   await page.screenshot({ path: testInfo.outputPath('reader-light.png'), animations: 'disabled' });
   await page.emulateMedia({ colorScheme: 'dark' });
   await page.screenshot({ path: testInfo.outputPath('reader-dark.png'), animations: 'disabled' });
@@ -124,7 +134,7 @@ test('Reddit 403 falls back to page with persistent partial coverage; light, dar
   expect(await frame.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await page.screenshot({ path: testInfo.outputPath('reader-narrow.png'), animations: 'disabled' });
   await frame.getByRole('button', { name: 'Actualiser' }).click();
-  await expect(frame.locator('#coverage')).toContainText('Lecture partielle');
+  await expect(frame.locator('#coverage')).toContainText(/automatiquement|automatique/);
 });
 
 test('incomplete generation stays visible and is never cached as complete', async ({ context }) => {
@@ -179,13 +189,14 @@ test('retry after a failed refresh fetches new comments instead of reusing the p
   await frame.getByRole('button', { name: 'Fermer les paramètres' }).click();
   await frame.getByRole('tab', { name: 'Discussion', exact: true }).click();
   let fail = true, attempts = 0;
-  await context.route('**/comments/1wo8160.json?*', route => {
+  await context.route(url => url.pathname.includes('/comments/1wo8160/') && url.pathname.endsWith('.json'), route => {
     attempts++;
     return fail ? route.fulfill({ status: 403, body: 'Blocked' }) : route.fulfill({ json: listing });
   });
   await page.evaluate(() => document.querySelector('shreddit-post').remove());
   await frame.getByRole('button', { name: 'Actualiser' }).click();
-  await expect(frame.locator('#notice')).toContainText('réessaie');
+  await expect(frame.locator('#retry-button')).toBeVisible();
+  await expect(frame.locator('#notice')).toContainText(/chargé|chargement/);
   expect(attempts).toBe(1);
   fail = false;
   await frame.getByRole('button', { name: 'Réessayer' }).click();
@@ -204,5 +215,28 @@ test('old Reddit HTML fallback preserves post, comments and reply context', asyn
   await expect(frame.locator('#reader')).toContainText('How can we balance our principles');
   await frame.locator('summary').filter({ hasText: 'u/bob' }).click();
   await expect(frame.locator('#reader')).toContainText('En réponse à u/alice');
-  await expect(frame.locator('#coverage')).toContainText('Lecture partielle');
+  await expect(frame.locator('#coverage')).toContainText(/automatiquement|automatique/);
+});
+
+test('JSON retrieval succeeds in the Reddit page when extension-origin requests would be forbidden', async ({ context }) => {
+  await setup(context, { onlyPageRequests: true });
+  const page = await context.newPage();
+  await page.goto(THREAD);
+  const frame = await openReader(page);
+  await expect(frame.locator('#coverage-title')).toContainText('3 commentaires lus');
+  await expect(frame.locator('#coverage')).toHaveAttribute('data-complete', 'true');
+});
+
+test('403 automatically expands missing replies while the reader dialog is open', async ({ context }) => {
+  await setup(context, { blocked: true, automaticReplies: true });
+  const page = await context.newPage();
+  await page.goto(THREAD);
+  const frame = await openReader(page);
+  await expect(frame.locator('#coverage-title')).toContainText('3 commentaires lus');
+  await expect(frame.locator('#coverage')).toHaveAttribute('data-complete', 'true');
+  await expect(page.locator('#load-replies')).toHaveCount(0);
+  await frame.getByRole('button', { name: 'Fermer les paramètres' }).click();
+  await frame.getByRole('tab', { name: 'Discussion', exact: true }).click();
+  await expect(frame.locator('#reader')).toContainText('automatically discovered');
+  await expect(frame.locator('#coverage')).not.toContainText('Déplie');
 });

@@ -89,14 +89,18 @@ function delay(ms, signal) {
   });
 }
 
-async function getJson(url, signal) {
+async function getJson(url, signal, requestJson, request) {
   for (let attempt = 0; attempt < 2; attempt++) {
-    const response = await fetch(url, {
+    signal.throwIfAborted();
+    // In the extension, Reddit requests run in its own tab so they have the
+    // page's same-origin session. Direct fetch remains useful outside Chrome.
+    const response = requestJson ? await requestJson(request) : await fetch(url, {
       credentials: 'include', signal: AbortSignal.any([signal, AbortSignal.timeout(30_000)]),
       headers: { Accept: 'application/json' },
     });
+    signal.throwIfAborted();
     if (response.status === 429 && attempt === 0) {
-      const retry = response.headers.get('retry-after');
+      const retry = requestJson ? response.retryAfter : response.headers.get('retry-after');
       const seconds = Number(retry);
       const wait = retry && Number.isFinite(seconds) ? seconds * 1000 : Math.max(1000, Date.parse(retry) - Date.now() || 1000);
       // Do not hold the reader indefinitely for a server-imposed cooldown.
@@ -104,8 +108,8 @@ async function getJson(url, signal) {
     }
     if (!response.ok) throw new Error(response.status === 429
       ? 'Reddit limite temporairement les requêtes (HTTP 429).'
-      : `Reddit : HTTP ${response.status}.`);
-    try { return await response.json(); }
+      : response.status ? `Reddit : HTTP ${response.status}.` : response.error || 'Impossible de joindre Reddit depuis cet onglet.');
+    try { return requestJson ? response.data : await response.json(); }
     catch { throw new Error('Reddit n’a pas renvoyé les commentaires au format JSON.'); }
   }
 }
@@ -137,7 +141,24 @@ function orderComments(nodes, rootId) {
   return ordered;
 }
 
-export async function fetchThread(threadId, { signal, onProgress = () => {}, origin = 'https://www.reddit.com', getSnapshot } = {}) {
+// Parent existence alone is insufficient: a cycle has every parent present
+// while no comment in that branch is connected to the requested post.
+function completeAncestry(nodes, rootId, parentKey) {
+  const connected = new Set([rootId]);
+  for (const id of nodes.keys()) {
+    const branch = new Set();
+    let next = id;
+    while (!connected.has(next)) {
+      if (branch.has(next) || !nodes.has(next)) return false;
+      branch.add(next);
+      next = nodes.get(next)[parentKey];
+    }
+    for (const parentId of branch) connected.add(parentId);
+  }
+  return true;
+}
+
+export async function fetchThread(threadId, { signal, onProgress = () => {}, onStatus = () => {}, origin = 'https://www.reddit.com', requestJson, collectComments, getSnapshot } = {}) {
   signal ||= new AbortController().signal;
   signal.throwIfAborted();
   const id = String(threadId).replace(/^t3_/, '');
@@ -172,7 +193,8 @@ export async function fetchThread(threadId, { signal, onProgress = () => {}, ori
     }
   }
   try {
-    const initial = listing(await getJson(endpoint.href, signal), rootId);
+    onStatus('Récupération de la discussion depuis Reddit…');
+    const initial = listing(await getJson(endpoint.href, signal, requestJson, { kind: 'thread' }), rootId);
     root = initial.root; collect(initial.things); onProgress(nodes.size);
     while (pending.size || branches.size) {
       signal.throwIfAborted();
@@ -184,7 +206,7 @@ export async function fetchThread(threadId, { signal, onProgress = () => {}, ori
         if (!ids.length) continue;
         const url = new URL('/api/morechildren.json', origin);
         url.search = new URLSearchParams({ api_type: 'json', raw_json: '1', link_id: rootId, children: ids.join(','), sort: 'confidence' });
-        const response = await getJson(url.href, signal);
+        const response = await getJson(url.href, signal, requestJson, { kind: 'more', children: ids });
         if (response?.json?.errors?.length || !Array.isArray(response?.json?.data?.things))
           throw new Error('Reddit n’a pas fourni toutes les réponses supplémentaires.');
         collect(response.json.data.things);
@@ -194,7 +216,7 @@ export async function fetchThread(threadId, { signal, onProgress = () => {}, ori
         branches.delete(parent); visitedBranches.add(parent);
         const url = new URL(endpoint);
         url.searchParams.set('comment', parent.slice(3)); url.searchParams.set('context', '0');
-        collect(listing(await getJson(url.href, signal), rootId).things);
+        collect(listing(await getJson(url.href, signal, requestJson, { kind: 'thread', commentId: parent.slice(3) }), rootId).things);
       }
       onProgress(nodes.size);
     }
@@ -204,23 +226,38 @@ export async function fetchThread(threadId, { signal, onProgress = () => {}, ori
   }
   signal.throwIfAborted();
   const reported = Number.isSafeInteger(root?.num_comments) && root.num_comments >= 0 ? root.num_comments : null;
-  if ([...nodes.values()].some((node) => node.parent_id !== rootId && !nodes.has(node.parent_id))) incomplete = true;
-  const partialReason = problem || 'Certains commentaires signalés par Reddit ne sont pas accessibles dans les données reçues.';
+  if (!completeAncestry(nodes, rootId, 'parent_id')) incomplete = true;
+  const partialReason = 'Certains commentaires annoncés par Reddit restent inaccessibles après la collecte automatique.';
   if (!root || problem || incomplete || (reported !== null && nodes.size < reported)) {
-    let page;
-    try { page = await getSnapshot?.(); } catch { signal.throwIfAborted(); }
+    let page, collectionError;
+    if (collectComments) {
+      onStatus('Chargement automatique des réponses supplémentaires…');
+      try { page = await collectComments(); }
+      catch (error) { signal.throwIfAborted(); collectionError = error.message; }
+    }
+    if (!page) try { page = await getSnapshot?.(); } catch { signal.throwIfAborted(); }
     signal.throwIfAborted();
     if (page?.id === rootId && Array.isArray(page.comments)) {
-      if (!root) return { ...page, coverage: { ...page.coverage, complete: false, loaded: page.comments.length, source: 'page', reason: `${problem} ${page.coverage?.reason || 'Seuls les commentaires chargés dans la page sont disponibles. Déplie les réponses sur Reddit puis actualise la lecture pour en inclure davantage.'}` } };
+      const pageNodes = new Map(page.comments.map((comment) => [comment.id, comment]));
+      const pageComplete = page.coverage?.source === 'page-auto' && page.coverage.complete === true &&
+        Number.isSafeInteger(page.coverage.reported) && page.coverage.reported >= 0 &&
+        pageNodes.size >= page.coverage.reported && completeAncestry(pageNodes, rootId, 'parent');
+      if (!root) return { ...page, coverage: { ...page.coverage, complete: pageComplete, loaded: page.comments.length,
+        source: page.coverage?.source === 'page-auto' ? 'page-auto' : 'page', reason: pageComplete ? '' : collectionError || page.coverage?.reason || (/429/.test(problem) ? problem : partialReason) } };
       // Keep successful API work; merge additional on-page comments.
       const result = processThreadData(root, orderComments(nodes, rootId));
       const comments = new Map(result.comments.map((comment) => [comment.id, comment]));
       for (const comment of page.comments) if (!comments.has(comment.id)) comments.set(comment.id, comment);
       result.comments = [...comments.values()];
-      result.coverage = { ...result.coverage, loaded: result.comments.length, reason: partialReason, complete: false };
+      const graphComplete = completeAncestry(comments, rootId, 'parent');
+      const complete = pageComplete && graphComplete && (reported === null || result.comments.length >= reported);
+      const missing = reported === null ? null : Math.max(0, reported - result.comments.length);
+      const reason = missing > 0 ? `${missing} commentaire${missing === 1 ? '' : 's'} annoncé${missing === 1 ? '' : 's'} par Reddit n’${missing === 1 ? 'a' : 'ont'} pas été renvoyé${missing === 1 ? '' : 's'} après la collecte automatique.`
+        : page.coverage?.reason || partialReason;
+      result.coverage = { ...result.coverage, loaded: result.comments.length, reason: complete ? '' : reason, complete };
       return result;
     }
-    if (!root) throw new Error(`${problem} Ouvre la discussion sur Reddit, charge ses commentaires, puis réessaie.`);
+    if (!root) throw new Error(collectionError || 'Le chargement automatique n’a pas pu accéder à cette discussion. Recharge Reddit puis réessaie.');
   }
   const complete = !problem && !incomplete && !pending.size && !branches.size && reported !== null && nodes.size >= reported;
   const reason = problem || (complete ? '' : 'Certains commentaires signalés par Reddit ne sont pas accessibles dans les données reçues.');

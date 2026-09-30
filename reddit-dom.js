@@ -139,7 +139,7 @@
       url: isOwnThread ? null : externalUrl, comments: [...comments.values()],
       coverage: {
         complete: false, loaded: comments.size, reported, source: 'page',
-        reason: 'Seuls les commentaires chargés dans la page sont disponibles. Déplie les réponses sur Reddit puis actualise la lecture pour en inclure davantage.',
+        reason: 'Certains commentaires restent inaccessibles après la tentative de chargement automatique.',
       },
     };
   }

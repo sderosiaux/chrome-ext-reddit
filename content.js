@@ -3,6 +3,10 @@
   window.redditDistillInitialized = true;
   const extensionOrigin = chrome.runtime.getURL('').replace(/\/$/, '');
   const hosts = new Set(['reddit.com', 'www.reddit.com', 'old.reddit.com', 'new.reddit.com']);
+  const requestIdPattern = /^[a-zA-Z0-9_-]{1,80}$/;
+  const commentIdPattern = /^[a-z0-9]{1,32}$/;
+  const requests = new Map();
+  const cancelledRequests = new Set();
   let threadId = null;
   let session = null;
   let button = null;
@@ -15,7 +19,12 @@
     return match ? `t3_${match[1].toLowerCase()}` : null;
   }
   function send(message) { return chrome.runtime.sendMessage(message); }
+  function abortRequests() {
+    for (const controller of requests.values()) controller.abort();
+    requests.clear();
+  }
   function close() {
+    abortRequests();
     if (!session?.dialog.open) return;
     session.frame.contentWindow?.postMessage({ action: 'closed', token: session.token }, extensionOrigin);
     session.dialog.close();
@@ -26,11 +35,76 @@
     close();
     const old = session;
     session = null;
+    cancelledRequests.clear();
     old.host.remove(); // iframe pagehide aborts in-flight work, including startup.
     send({ action: 'unregisterReader', token: old.token, threadId: old.threadId }).catch(() => {});
   }
   function notifyOpen() {
     if (session?.ready && session.dialog.open) session.frame.contentWindow.postMessage({ action: 'opened', token: session.token }, extensionOrigin);
+  }
+  function redditEndpoint(request, id) {
+    if (!request || typeof request !== 'object') throw new Error('Requête Reddit invalide.');
+    if (request.kind === 'thread' && (request.commentId === undefined ||
+        (typeof request.commentId === 'string' && commentIdPattern.test(request.commentId)))) {
+      // Reddit accepts the canonical page route more consistently than the
+      // short /comments/<id>.json route. Drop a focused comment from permalinks.
+      const parts = new URL(location.href).pathname.split('/').filter(Boolean);
+      const index = parts.findIndex((part) => part.toLowerCase() === 'comments');
+      const path = parts.slice(0, index + 3).join('/').replace(/\.json$/, '');
+      const url = new URL(`/${path}.json`, location.origin);
+      url.search = new URLSearchParams({ raw_json: '1', limit: '500', sort: 'confidence' });
+      if (request.commentId) { url.searchParams.set('comment', request.commentId); url.searchParams.set('context', '0'); }
+      return url;
+    }
+    if (request.kind === 'more' && Array.isArray(request.children) && request.children.length > 0 &&
+        request.children.length <= 100 && request.children.every((child) => typeof child === 'string' && commentIdPattern.test(child))) {
+      const url = new URL('/api/morechildren.json', location.origin);
+      url.search = new URLSearchParams({ api_type: 'json', raw_json: '1', link_id: id,
+        children: [...new Set(request.children)].join(','), sort: 'confidence' });
+      return url;
+    }
+    throw new Error('Requête Reddit invalide.');
+  }
+  async function fetchRedditJson(request, id, signal) {
+    const url = redditEndpoint(request, id);
+    const response = await fetch(url.href, { credentials: 'include', mode: 'same-origin', redirect: 'follow',
+      headers: { Accept: 'application/json' }, signal });
+    if (response.url && new URL(response.url).origin !== location.origin) throw new Error('Reddit a redirigé la requête vers une autre origine.');
+    if (!response.ok) return { ok: false, status: response.status, retryAfter: response.headers.get('Retry-After'),
+      error: response.status === 429 ? 'Reddit limite temporairement les requêtes (HTTP 429).' : `Reddit : HTTP ${response.status}.` };
+    try { return { ok: true, data: await response.json() }; }
+    catch { signal.throwIfAborted(); throw new Error('Reddit n’a pas renvoyé les commentaires au format JSON.'); }
+  }
+  async function runRequest(message, active, controller) {
+    const { signal } = controller;
+    let timedOut = false;
+    const timer = setTimeout(() => { timedOut = true; controller.abort(); }, message.action === 'collectPageComments' ? 150_000 : 20_000);
+    try {
+      signal.throwIfAborted();
+      let result;
+      if (message.action === 'fetchRedditJson') result = await fetchRedditJson(message.request, active.threadId, signal);
+      else {
+        if (!globalThis.RedditDistillLoader?.collect) throw new Error('Le chargement automatique est indisponible. Recharge cette discussion Reddit.');
+        const collected = await globalThis.RedditDistillLoader.collect({ threadId: active.threadId, signal, onProgress(progress) {
+          if (signal.aborted || session !== active || currentThread() !== active.threadId) return;
+          active.frame.contentWindow?.postMessage({ action: 'pageCollectionProgress', token: active.token, threadId: active.threadId,
+            requestId: message.requestId, progress }, extensionOrigin);
+        } });
+        const thread = collected?.thread || collected;
+        result = thread?.id === active.threadId ? { ok: true, thread }
+          : { ok: false, error: 'Les commentaires de cette discussion ne sont pas encore disponibles.' };
+      }
+      signal.throwIfAborted();
+      if (session !== active || currentThread() !== active.threadId) throw new Error('La discussion Reddit a changé. Rouvre Distill.');
+      return result;
+    } catch (error) {
+      return { ok: false, error: timedOut ? 'Reddit met trop de temps à répondre.' : signal.aborted
+        ? 'Chargement Reddit annulé.' : error.message || 'Impossible de charger les commentaires Reddit.',
+      ...(signal.aborted ? { aborted: true } : {}) };
+    } finally {
+      clearTimeout(timer);
+      if (requests.get(message.requestId) === controller) requests.delete(message.requestId);
+    }
   }
   function open() {
     syncPage();
@@ -105,6 +179,37 @@
   chrome.runtime.onMessage.addListener((message, sender, respond) => {
     if (sender.id !== chrome.runtime.id) return;
     if (message?.action === 'openReader') { open(); respond({ ok: Boolean(threadId) }); }
+    if (['fetchRedditJson', 'collectPageComments', 'cancelRedditRequest'].includes(message?.action)) {
+      syncPage();
+      if (!session?.authorized || !session.dialog.open || message.token !== session.token || message.threadId !== session.threadId ||
+          currentThread() !== session.threadId || typeof message.requestId !== 'string' || !requestIdPattern.test(message.requestId)) {
+        respond({ ok: false, error: 'La discussion Reddit a changé. Rouvre Distill.' });
+        return;
+      }
+      if (message.action === 'cancelRedditRequest') {
+        // Cancellation can overtake the initial relay while the worker reads
+        // session storage. Keep a small set of tombstones for that race.
+        cancelledRequests.add(message.requestId);
+        if (cancelledRequests.size > 256) cancelledRequests.delete(cancelledRequests.values().next().value);
+        requests.get(message.requestId)?.abort();
+        respond({ ok: true });
+        return;
+      }
+      if (cancelledRequests.has(message.requestId)) {
+        respond({ ok: false, aborted: true, error: 'Chargement Reddit annulé.' });
+        return;
+      }
+      if (requests.has(message.requestId) || requests.size >= 8 || (message.action === 'collectPageComments' &&
+          [...requests.values()].some((controller) => controller.collecting))) {
+        respond({ ok: false, error: 'Un chargement Reddit est déjà en cours.' });
+        return;
+      }
+      const controller = new AbortController();
+      controller.collecting = message.action === 'collectPageComments';
+      requests.set(message.requestId, controller);
+      runRequest(message, session, controller).then(respond);
+      return true;
+    }
     if (message?.action === 'readPageSnapshot') {
       syncPage();
       if (!session?.authorized || message.token !== session.token || message.threadId !== session.threadId || currentThread() !== session.threadId) {
