@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Reddit Distill</title>
+  <link rel="stylesheet" href="design-system.css">
+  <link rel="stylesheet" href="panel.css">
+  <link rel="stylesheet" href="diagrams.css">
+</head>
+<body>
+  <header class="header">
+    <div class="title-row">
+      <h1 id="thread-title">Discussion Reddit</h1>
+      <button id="settings-button" class="icon-button" title="Paramètres" aria-label="Paramètres">⚙</button>
+      <button id="close-button" class="icon-button" title="Fermer" aria-label="Fermer">×</button>
+    </div>
+    <div class="toolbar">
+      <nav aria-label="Lecture" role="tablist">
+        <button role="tab" aria-selected="true" aria-controls="reader" id="tab-summary" data-mode="summary">Synthèse</button>
+        <button role="tab" aria-selected="false" aria-controls="reader" id="tab-qa" data-mode="qa" tabindex="-1">Questions-réponses</button>
+        <button role="tab" aria-selected="false" aria-controls="reader" id="tab-sources" data-mode="sources" tabindex="-1">Discussion</button>
+      </nav>
+      <div id="detail-controls" class="segments" role="group" aria-label="Profondeur de lecture">
+        <button data-detail="short" aria-pressed="true">Courte</button>
+        <button data-detail="deep" aria-pressed="false">Approfondie</button>
+      </div>
+      <div class="actions">
+        <button id="stop-button" hidden>Arrêter</button>
+        <select id="copy-format" aria-label="Format de copie"><option value="markdown">Markdown</option><option value="text">Texte</option></select>
+        <button id="copy-button" disabled>Copier</button>
+      </div>
+    </div>
+  </header>
+  <main id="main-content">
+    <div id="coverage" role="status" hidden><div><strong id="coverage-title"></strong><p id="coverage-description"></p></div><button id="refresh-button">Actualiser</button></div>
+    <div id="notice" role="status" hidden><span id="notice-text"></span><button id="retry-button" hidden>Réessayer</button></div>
+    <div id="progress" role="status" hidden><span id="progress-label"></span><span id="progress-time" aria-hidden="true"></span></div>
+    <div id="empty" hidden><h2>Comprendre cette discussion</h2><p>Relie les arguments, les objections et les expériences à leurs sources.</p><button id="configure-button" class="primary">Configurer ma clé API</button></div>
+    <article id="reader" role="tabpanel" aria-labelledby="tab-summary" tabindex="0"></article>
+  </main>
+  <dialog id="settings-dialog" aria-labelledby="settings-title">
+    <form id="settings-form">
+      <div class="dialog-heading"><h2 id="settings-title">Paramètres</h2><button type="button" id="cancel-settings" class="icon-button" aria-label="Fermer les paramètres">×</button></div>
+      <label for="provider">Modèle</label>
+      <select id="provider"><option value="openai">Luna · OpenAI</option><option value="claude">Sonnet 4.5 · Anthropic</option></select>
+      <label for="api-key">Clé API</label>
+      <input id="api-key" type="password" autocomplete="off" spellcheck="false" placeholder="sk-…">
+      <label class="checkbox"><input type="checkbox" id="remember-key"> Conserver la clé sur cet appareil</label>
+      <p class="hint">Sinon, la clé reste disponible jusqu’à la fermeture du navigateur. Aucun envoi vers Chrome Sync.</p>
+      <p class="hint">L’analyse transmet le texte de cette discussion et ton contexte au fournisseur choisi. Les appels utilisent ton crédit API.</p>
+      <label for="language">Langue des notes</label>
+      <select id="language"><option value="fr">Français</option><option value="en">English</option><option value="es">Español</option><option value="de">Deutsch</option><option value="pt">Português</option><option value="zh">中文</option><option value="ja">日本語</option></select>
+      <label for="personal-context">Ce qui m’aide à comprendre <span class="hint">(facultatif)</span></label>
+      <textarea id="personal-context" rows="3" placeholder="Mon expérience, les notions qui me sont familières…"></textarea>
+      <p id="settings-error" role="alert" hidden></p>
+      <div class="settings-tools"><button type="button" id="forget-key">Effacer cette clé</button><button type="button" id="clear-cache">Effacer les notes enregistrées</button></div>
+      <div class="dialog-actions"><button type="submit" class="primary">Enregistrer</button></div>
+    </form>
+  </dialog>
+  <script type="module" src="panel.js"></script>
+</body>
+</html>

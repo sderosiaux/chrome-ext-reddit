@@ -1,0 +1,80 @@
+# Reddit Distill
+
+Une extension Chrome pour comprendre une discussion Reddit : les arguments, les objections, les expériences des participants et les questions ouvertes. Adaptée de [HN Distill](https://github.com/sderosiaux/chrome-ext-hn), avec le même lecteur en français.
+
+## Installation
+
+1. Cloner ce dépôt, ou télécharger et décompresser l’archive de l’extension.
+2. Ouvrir `chrome://extensions` et activer le **Mode développeur**.
+3. Cliquer sur **Charger l’extension non empaquetée** et sélectionner le dossier contenant `manifest.json`.
+4. Ouvrir une discussion sur `www.reddit.com`, `old.reddit.com`, `new.reddit.com` ou `reddit.com`, puis cliquer sur **Distill** ou sur l’icône de l’extension.
+5. Renseigner une clé OpenAI ou Anthropic. Les appels sont facturés par le fournisseur sur ce compte API. La lecture des commentaires dans **Discussion** fonctionne sans clé.
+
+Aucune compilation, dépendance ou serveur n’est nécessaire pour utiliser l’extension. Après une mise à jour, recharger l’extension puis les onglets Reddit ouverts. Les clés de l’extension HN ne sont pas partagées automatiquement avec celle-ci.
+
+[Exemple de discussion](https://www.reddit.com/r/ExperiencedDevs/comments/1wo8160/struggling_with_moral_implications_of_ai/).
+
+## Lecture
+
+- **Synthèse** : arguments, objections, témoignages et interprétations, organisés selon le contenu du fil.
+- **Questions-réponses** : un parcours par sujet, avec les positions opposées dans leur contexte.
+- **Discussion** : post et commentaires récupérés, avec les messages parents et les liens d’origine.
+- **Courte / Approfondie** : aperçu concis par défaut ; explications plus développées sur demande.
+- **Sources** : références contrôlées contre les identifiants réellement fournis au modèle, consultables dans le lecteur ou sur Reddit. Une référence valide ne prouve pas la véracité d’une affirmation.
+- **Copier** : notes ou discussion en Markdown ou texte. Les exports signalent aussi les fils partiellement récupérés et les générations interrompues.
+- **Actualiser** : relire le fil et les commentaires nouvellement chargés. Fermer puis rouvrir le lecteur relit également les données.
+
+Les notes arrivent progressivement. Les longs fils sont répartis en lots avec leur contexte parental, puis réunis en une synthèse sourcée. Les notes de travail intermédiaires sont explicitement provisoires. La synthèse compresse le contenu : elle ne promet pas de restituer chaque détail.
+
+Des schémas peuvent illustrer les relations utiles. L’extension construit elle-même les SVG à partir d’un graphe JSON validé ; elle n’exécute ni HTML ni code généré par le modèle. Les exports Markdown incluent ces schémas en Mermaid.
+
+Le thème suit le système. Échap ferme les paramètres ou le lecteur, les flèches changent d’onglet. La langue des notes et le contexte personnel sont configurables ; le profil ajuste les explications sans écarter les avis contraires.
+
+## Récupération des commentaires
+
+L’extension tente d’abord le JSON du fil Reddit, puis charge les réponses supplémentaires et les branches différées. Les appels `morechildren` sont séquentiels et contiennent au plus 100 identifiants, conformément à la [documentation Reddit](https://www.reddit.com/dev/api/#GET_api_morechildren). Elle conserve les relations parent/réponse, les commentaires courts et les repères de messages supprimés. Les scores ne sont pas considérés comme une preuve de vérité ou de consensus.
+
+Reddit peut refuser l’accès JSON, limiter les requêtes ou ne pas fournir certaines réponses. Dans ce cas, les commentaires déjà accessibles sont conservés et l’extension utilise les messages présents dans la page lorsque c’est possible. Ce repli ne déroule pas automatiquement les boutons « more replies » : charger davantage de réponses dans Reddit, puis utiliser **Actualiser** dans Distill.
+
+Le nombre de commentaires lus et la couverture restent visibles au-dessus des notes. La lecture de la page seule est toujours signalée comme **partielle**. Un chargement JSON n’est considéré complet que si les branches récupérées ne laissent aucun trou détecté et que le nombre annoncé est atteint. Le compteur Reddit peut inclure des commentaires modérés ou supprimés ; il ne garantit pas à lui seul l’exhaustivité. Une limite de 100 requêtes d’expansion empêche un chargement indéfini et est signalée si elle est atteinte.
+
+Les permaliens de commentaires ouvrent l’analyse du fil entier. Les changements de discussion sans rechargement de page annulent l’ancien lecteur. Les articles externes, images et vidéos ne sont pas téléchargés ni analysés : seules les données textuelles récupérées du post et des commentaires sont transmises au modèle.
+
+## Confidentialité et stockage
+
+- Les clés sont conservées dans `chrome.storage.session` par défaut, ou dans `chrome.storage.local` avec l’option **Conserver la clé sur cet appareil**. Aucun Chrome Sync.
+- Le stockage des clés est réservé aux contextes de confiance de l’extension. L’ouverture du lecteur est liée au tab, à l’origine Reddit, à la discussion et à son iframe par un échange de vérification.
+- Le texte récupéré et le contexte personnel sont envoyés uniquement au fournisseur choisi. Ne lancer une analyse que pour du contenu que l’on souhaite lui transmettre. Les données de session Reddit servent uniquement aux requêtes vers Reddit.
+- OpenAI : modèle `gpt-6-luna`, Responses API, streaming, sortie JSON structurée, `store: false`. Anthropic : `claude-sonnet-4-5`, Messages API et sortie structurée. Les politiques de conservation des fournisseurs restent applicables.
+- Seules les générations terminées et validées sont mises en cache localement, avec leur couverture. Le cache tient compte du contenu, du modèle, du prompt, du mode, de la profondeur, de la langue et du contexte. Limite : 30 résultats, environ 3 Mo.
+- **Arrêter**, fermer le lecteur ou changer de lecture annule la requête locale. Cela ne garantit pas l’arrêt immédiat de la facturation du fournisseur. Les passages déjà reçus restent consultables comme notes incomplètes.
+- Les paramètres permettent d’effacer les clés et les notes enregistrées. Aucun suivi, télémétrie ou backend propre à l’extension.
+
+## Développement et vérification
+
+Node.js 22 ou ultérieur pour les outils de développement uniquement :
+
+```sh
+npm ci
+npm run check
+npm test
+npx playwright install chromium
+npm run test:browser
+npm run package
+```
+
+L’archive produite dans `dist/` contient uniquement les fichiers nécessaires à l’extension et ce README. Le workflow GitHub Actions exécute les mêmes contrôles et publie cette archive comme artefact.
+
+Les tests unitaires couvrent la collecte, la pagination, les identifiants et sources, les exports, le découpage et le streaming. Les tests navigateur chargent réellement l’extension dans Chromium, avec des pages Reddit et réponses API contrôlées : paramètres, sources, Q/R, cache, repli après HTTP 403, avertissement de couverture, interruption, navigation SPA et refus d’un lecteur usurpé. Les appels IA y sont simulés ; ces tests ne mesurent pas la qualité d’un modèle réel et ne garantissent pas l’accès à Reddit depuis chaque réseau.
+
+| Fichier | Rôle |
+| --- | --- |
+| `content.js`, `content.css`, `background.js` | Bouton, lecteur isolé, navigation Reddit et communication sécurisée |
+| `data.js`, `reddit-dom.js` | Collecte JSON, réponses différées, lecture de la page, couverture et découpage |
+| `prompts.js`, `analysis.js` | Instructions, schéma, validation des réponses et références |
+| `api_client.js`, `generation.js` | Streaming et synthèse des longs fils |
+| `panel.html`, `panel.js`, `panel.css`, `design-system.css` | Lecteur et paramètres |
+| `render.js`, `markdown.js`, `diagrams.js`, `diagrams.css` | Sources, export et schémas |
+| `storage.js` | Clés, préférences et cache |
+
+Projet indépendant, non affilié à Reddit.

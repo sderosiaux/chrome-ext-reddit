@@ -1,0 +1,19 @@
+.inline-diagram {
+  margin: 22px 0 26px;
+  color: var(--ink);
+}
+.inline-diagram figcaption {
+  margin-bottom: 10px;
+  font: 500 13px/1.5 system-ui, sans-serif;
+  color: var(--muted);
+}
+.diagram-viewport { overflow-x: auto; overscroll-behavior-x: contain; }
+.diagram-viewport:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.diagram-viewport svg { display: block; margin: 0 auto; max-width: none; }
+.diagram-node { fill: var(--wash, var(--soft)); stroke: var(--line); stroke-width: 1.5; }
+.diagram-node-label { fill: var(--ink); font: 500 14px system-ui, sans-serif; }
+.diagram-edge { fill: none; stroke: var(--accent); stroke-width: 1.6; stroke-linejoin: round; }
+.diagram-arrow { fill: var(--accent); }
+.diagram-label-bg { fill: var(--paper); }
+.diagram-edge-label { fill: var(--accent); font: 400 12px system-ui, sans-serif; }
+.diagram-copy { position: fixed; top: 0; left: -100000px; width: 720px; pointer-events: none; }

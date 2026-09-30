@@ -1,0 +1,152 @@
+(() => {
+  if (window.redditDistillInitialized) return;
+  window.redditDistillInitialized = true;
+  const extensionOrigin = chrome.runtime.getURL('').replace(/\/$/, '');
+  const hosts = new Set(['reddit.com', 'www.reddit.com', 'old.reddit.com', 'new.reddit.com']);
+  let threadId = null;
+  let session = null;
+  let button = null;
+  let scheduled = false;
+
+  function currentThread() {
+    const url = new URL(location.href);
+    if (url.protocol !== 'https:' || url.port || !hosts.has(url.hostname)) return null;
+    const match = url.pathname.match(/^\/(?:r\/[a-z0-9_]+\/)?comments\/([a-z0-9]+)(?:\/|$)/i);
+    return match ? `t3_${match[1].toLowerCase()}` : null;
+  }
+  function send(message) { return chrome.runtime.sendMessage(message); }
+  function close() {
+    if (!session?.dialog.open) return;
+    session.frame.contentWindow?.postMessage({ action: 'closed', token: session.token }, extensionOrigin);
+    session.dialog.close();
+    if (session.focus?.isConnected) session.focus.focus();
+  }
+  function destroy() {
+    if (!session) return;
+    close();
+    const old = session;
+    session = null;
+    old.host.remove(); // iframe pagehide aborts in-flight work, including startup.
+    send({ action: 'unregisterReader', token: old.token, threadId: old.threadId }).catch(() => {});
+  }
+  function notifyOpen() {
+    if (session?.ready && session.dialog.open) session.frame.contentWindow.postMessage({ action: 'opened', token: session.token }, extensionOrigin);
+  }
+  function open() {
+    syncPage();
+    if (!threadId || !document.body) return;
+    if (!session) {
+      const host = document.createElement('div');
+      const root = host.attachShadow({ mode: 'closed' });
+      const style = document.createElement('style');
+      style.textContent = `
+        :host{all:initial;color-scheme:light;--reader-paper:#fff;--reader-ink:#282b27;--reader-line:#e5e6e0;--reader-shadow:#282b2733}
+        dialog{box-sizing:border-box;padding:0;border:1px solid var(--reader-line);border-radius:12px;width:min(1120px,calc(100vw - 32px));height:calc(100dvh - 40px);max-width:none;max-height:none;background:var(--reader-paper);color:var(--reader-ink);box-shadow:0 25px 90px var(--reader-shadow);overflow:hidden;color-scheme:inherit}
+        dialog::backdrop{background:#282b2752}
+        iframe{display:block;width:100%;height:100%;border:0;background:var(--reader-paper);color-scheme:inherit}
+        @media(prefers-color-scheme:dark){
+          :host{color-scheme:dark;--reader-paper:#201d1b;--reader-ink:#eee9e3;--reader-line:#443c36;--reader-shadow:#00000080}
+          dialog::backdrop{background:#00000080}
+        }
+        @media(max-width:640px){dialog{width:calc(100vw - 12px);height:calc(100dvh - 24px);border-radius:8px}}
+      `;
+      const dialog = document.createElement('dialog');
+      dialog.setAttribute('aria-label', 'Lecture de la discussion Reddit');
+      const frame = document.createElement('iframe');
+      frame.title = 'Reddit Distill';
+      frame.allow = 'clipboard-write';
+      const token = crypto.randomUUID();
+      const active = { host, dialog, frame, token, threadId, ready: false, authorized: false };
+      session = active;
+      dialog.append(frame);
+      root.append(style, dialog);
+      document.body.append(host);
+      send({ action: 'registerReader', token, threadId: active.threadId }).then((response) => {
+        if (session !== active || currentThread() !== active.threadId) {
+          send({ action: 'unregisterReader', token, threadId: active.threadId }).catch(() => {});
+          return;
+        }
+        if (!response?.ok) throw new Error('Registration failed');
+        const query = new URLSearchParams({ threadId: active.threadId, token, origin: location.origin });
+        frame.src = chrome.runtime.getURL(`panel.html?${query}`);
+      }).catch(() => {
+        if (session !== active) return;
+        const error = document.createElement('p');
+        error.textContent = 'Impossible d’ouvrir Distill. Recharge cette discussion Reddit et l’extension.';
+        error.style.cssText = 'padding:24px;font:16px system-ui';
+        frame.replaceWith(error);
+      });
+      dialog.addEventListener('cancel', (event) => { event.preventDefault(); close(); });
+      dialog.addEventListener('click', (event) => {
+        const rect = dialog.getBoundingClientRect();
+        if (event.target === dialog && (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom)) close();
+      });
+    }
+    if (session.dialog.open) return;
+    session.focus = document.activeElement;
+    session.dialog.showModal();
+    session.frame.focus();
+    notifyOpen();
+  }
+  window.addEventListener('message', (event) => {
+    if (!event.isTrusted || !session || currentThread() !== session.threadId || event.source !== session.frame.contentWindow || event.origin !== extensionOrigin || event.data?.token !== session.token) return;
+    if (event.data.action === 'authorize' && typeof event.data.challenge === 'string') {
+      const active = session;
+      send({ action: 'authorizeReader', token: active.token, threadId: active.threadId, challenge: event.data.challenge }).then((response) => {
+        if (!response?.ok || session !== active || currentThread() !== active.threadId) return;
+        active.authorized = true;
+        active.frame.contentWindow.postMessage({ action: 'authorized', token: active.token, challenge: event.data.challenge }, extensionOrigin);
+      }).catch(() => {});
+    }
+    if (!session.authorized) return;
+    if (event.data.action === 'ready') { session.ready = true; notifyOpen(); }
+    if (event.data.action === 'close') close();
+  });
+  chrome.runtime.onMessage.addListener((message, sender, respond) => {
+    if (sender.id !== chrome.runtime.id) return;
+    if (message?.action === 'openReader') { open(); respond({ ok: Boolean(threadId) }); }
+    if (message?.action === 'readPageSnapshot') {
+      syncPage();
+      if (!session?.authorized || message.token !== session.token || message.threadId !== session.threadId || currentThread() !== session.threadId) {
+        respond({ ok: false, error: 'La discussion Reddit a changé. Rouvre Distill.' });
+        return;
+      }
+      try {
+        const thread = globalThis.RedditDistillDOM.extractThread(document, location.href);
+        respond(thread?.id === session.threadId ? { ok: true, thread } : { ok: false, error: 'Les commentaires de cette discussion ne sont pas encore disponibles.' });
+      } catch {
+        respond({ ok: false, error: 'Impossible de lire les commentaires visibles. Recharge la discussion Reddit.' });
+      }
+    }
+  });
+  function syncPage() {
+    const next = currentThread();
+    if (next !== threadId) { destroy(); threadId = next; }
+    if (!next) { button?.remove(); button = null; return; }
+    if (!button) {
+      button = document.createElement('button');
+      button.id = 'reddit-distill-button';
+      button.type = 'button';
+      button.textContent = 'Distill';
+      button.title = 'Comprendre cette discussion Reddit';
+      button.setAttribute('aria-haspopup', 'dialog');
+      button.addEventListener('click', (event) => { if (event.isTrusted) open(); });
+    }
+    if (document.body && !button.isConnected) document.body.append(button);
+    if (session && !session.host.isConnected) destroy();
+  }
+  function scheduleSync() {
+    if (scheduled) return;
+    scheduled = true;
+    setTimeout(() => { scheduled = false; syncPage(); }, 80);
+  }
+  new MutationObserver(scheduleSync).observe(document.documentElement, { childList: true, subtree: true });
+  window.addEventListener('popstate', syncPage);
+  window.addEventListener('hashchange', syncPage);
+  window.addEventListener('pageshow', syncPage);
+  window.addEventListener('pagehide', destroy);
+  // pushState in Reddit's page world cannot be wrapped from an isolated script.
+  // Polling also covers same-document navigation without any DOM mutations.
+  setInterval(syncPage, 750);
+  syncPage();
+})();

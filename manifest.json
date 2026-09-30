@@ -1,0 +1,57 @@
+{
+  "manifest_version": 3,
+  "name": "Reddit Distill",
+  "version": "1.0.0",
+  "minimum_chrome_version": "120",
+  "description": "Comprendre les discussions Reddit : arguments, objections, questions-réponses et sources.",
+
+  "permissions": [
+    "activeTab",
+    "storage"
+  ],
+
+  "host_permissions": [
+    "https://www.reddit.com/*",
+    "https://old.reddit.com/*",
+    "https://new.reddit.com/*",
+    "https://reddit.com/*",
+    "https://api.openai.com/*",
+    "https://api.anthropic.com/*"
+  ],
+
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+
+  "content_scripts": [{
+    "matches": ["https://www.reddit.com/*", "https://old.reddit.com/*", "https://new.reddit.com/*", "https://reddit.com/*"],
+    "js": ["reddit-dom.js", "content.js"],
+    "css": ["content.css"],
+    "run_at": "document_idle"
+  }],
+
+  "web_accessible_resources": [{
+    "resources": [
+      "panel.html",
+      "panel.js",
+      "panel.css",
+      "design-system.css",
+      "diagrams.js",
+      "diagrams.css",
+      "api_client.js",
+      "prompts.js",
+      "markdown.js",
+      "data.js",
+      "analysis.js",
+      "generation.js",
+      "storage.js",
+      "render.js"
+    ],
+    "matches": ["https://www.reddit.com/*", "https://old.reddit.com/*", "https://new.reddit.com/*", "https://reddit.com/*"]
+  }],
+
+  "action": {
+    "default_title": "Comprendre cette discussion Reddit"
+  }
+}
