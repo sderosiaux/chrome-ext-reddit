@@ -166,6 +166,69 @@ test('SPA thread changes remove old reader; landing pages never show a thread bu
   await openReader(page);
 });
 
+test('thread focus hides navigation and shadow actions, keeps reading controls, and restores the feed', async ({ context }) => {
+  await setup(context);
+  const page = await context.newPage();
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto(THREAD);
+  // Model the layout and open shadow boundary observed on the live Reddit page.
+  // Add them after startup to also cover lazy hydration and new comments.
+  await page.evaluate(() => {
+    const content = document.createElement('shreddit-app');
+    content.innerHTML = `<style>
+      body { margin: 0; }
+      .grid-container { display: grid; grid-template-columns: 260px 1fr; }
+      #subgrid-container { width: 1120px; grid-column: 2; }
+      .main-container { display: grid; grid-template-columns: 756px 316px; gap: 24px; }
+      shreddit-comment, shreddit-post { display: block; }
+    </style><reddit-header-large>Reddit navigation</reddit-header-large>
+    <div class="grid-container"><div id="left-sidebar-container">Left navigation</div>
+      <div id="subgrid-container"><div class="main-container">
+        <main id="main-content"></main><div id="right-sidebar-container">Community sidebar</div>
+      </div></div>
+    </div>`;
+    const main = content.querySelector('main');
+    main.append(document.querySelector('h1'), document.querySelector('shreddit-post'), document.querySelector('shreddit-comment'));
+    main.insertAdjacentHTML('beforeend', `<comment-composer-host><textarea aria-label="Join the conversation"></textarea></comment-composer-host>
+      <button id="sort-comments">Sort comments</button><button id="more-replies">More replies</button>
+      <button id="collapse-comment">Collapse comment</button><input aria-label="Search comments">`);
+    document.body.append(content);
+    const post = document.querySelector('shreddit-post');
+    post.attachShadow({ mode: 'open' }).innerHTML = `<slot name="text-body"></slot>
+      <div data-testid="action-row"><button>Upvote post</button><button>Share post</button></div>`;
+    for (const comment of document.querySelectorAll('shreddit-comment')) {
+      comment.insertAdjacentHTML('beforeend', `<div slot="actionRow"><shreddit-comment-action-row>
+        <button>Upvote comment</button><button>Reply</button><button>Award</button>
+      </shreddit-comment-action-row></div>`);
+    }
+    document.querySelector('#more-replies').onclick = () => {
+      const reply = document.createElement('p'); reply.id = 'extra-reply'; reply.textContent = 'Another reply'; main.append(reply);
+    };
+  });
+  const distractions = ['reddit-header-large', '#left-sidebar-container', '#right-sidebar-container',
+    'comment-composer-host', 'shreddit-post [data-testid="action-row"]', 'shreddit-comment-action-row'];
+  for (const selector of distractions) await expect(page.locator(selector).first()).toBeHidden();
+  await expect(page.locator('h1')).toBeVisible();
+  for (const body of await page.locator('[slot="comment"], [slot="text-body"]').all()) await expect(body).toBeVisible();
+  await expect(page.getByLabel('Search comments')).toBeVisible();
+  await expect(page.locator('#sort-comments')).toBeVisible();
+  await expect(page.locator('#collapse-comment')).toBeVisible();
+  await page.locator('#more-replies').click();
+  await expect(page.locator('#extra-reply')).toBeVisible();
+  const bounds = await page.locator('#main-content').boundingBox();
+  expect(Math.abs(bounds.x + bounds.width / 2 - 720)).toBeLessThan(1);
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.evaluate(() => history.pushState({}, '', '/r/ExperiencedDevs/'));
+  for (const selector of distractions) await expect(page.locator(selector).first()).toBeVisible();
+  await page.evaluate(() => {
+    // A replaced shadow tree on re-entry must receive the stylesheet again.
+    document.querySelector('shreddit-post').shadowRoot.querySelector('style').remove();
+    history.pushState({}, '', '/comments/1wo8160/');
+  });
+  for (const selector of distractions) await expect(page.locator(selector).first()).toBeHidden();
+});
+
 test('page-created replay iframe cannot authorize itself or read a snapshot', async ({ context }) => {
   await setup(context);
   const page = await context.newPage();

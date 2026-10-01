@@ -161,6 +161,8 @@ function contentHarness(initialURL = URL_REDDIT, options = {}) {
   }
   document.body = new Element('body');
   document.documentElement = document.body;
+  document.documentElement.classList = { toggle() {} };
+  document.querySelectorAll = () => [];
   document.createElement = (tag) => new Element(tag);
   const chrome = { runtime: {
     id: EXTENSION_ID, getURL: (path) => `${EXTENSION_ORIGIN}/${path}`,

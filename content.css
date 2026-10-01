@@ -1,3 +1,67 @@
+/* Reading focus applies only while content.js recognizes a thread URL.
+   Keep Reddit's theme, comment folding, search, sorting and loading controls. */
+html.reddit-distill-focus :is(
+  reddit-header-large,
+  reddit-header-small,
+  #left-sidebar-container,
+  #right-sidebar-container,
+  shreddit-post-overflow-menu,
+  shreddit-comment-action-row,
+  shreddit-comment [slot="actionRow"],
+  shreddit-post [data-testid="action-row"],
+  comment-composer-host,
+  shreddit-async-loader:has(> comment-composer-host)
+) {
+  display: none !important;
+}
+
+html.reddit-distill-focus shreddit-app {
+  --shreddit-header-height: 0px;
+  --page-y-padding: 0px;
+  padding-top: 0 !important;
+}
+
+html.reddit-distill-focus .grid-container {
+  display: block !important;
+  padding: 0 !important;
+}
+
+html.reddit-distill-focus #subgrid-container {
+  box-sizing: border-box;
+  width: 100% !important;
+  max-width: 900px !important;
+  margin-inline: auto !important;
+  padding: 24px 16px 64px !important;
+}
+
+html.reddit-distill-focus #main-content {
+  width: 100% !important;
+  max-width: none !important;
+  min-width: 0 !important;
+}
+
+html.reddit-distill-focus .main-container {
+  grid-template-columns: minmax(0, 1fr) !important;
+  gap: 0 !important;
+}
+
+/* The same reading view on old.reddit.com. More replies and collapse links
+   sit outside these action bars and remain available. */
+html.reddit-distill-focus body > :is(#header, .side, .footer-parent),
+html.reddit-distill-focus .thing > .midcol,
+html.reddit-distill-focus .thing > .entry > .buttons,
+html.reddit-distill-focus .commentarea > .usertext {
+  display: none !important;
+}
+
+html.reddit-distill-focus body > .content {
+  box-sizing: border-box;
+  width: 100% !important;
+  max-width: 900px !important;
+  margin: 24px auto 64px !important;
+  padding-inline: 16px !important;
+}
+
 #reddit-distill-button {
   color-scheme: light;
   --fab-paper: #fffaf6;

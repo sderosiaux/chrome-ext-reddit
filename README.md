@@ -16,6 +16,7 @@ Aucune compilation, dépendance ou serveur n’est nécessaire pour utiliser l�
 
 ## Lecture
 
+- **Focus automatique sur Reddit** : à l’ouverture d’un thread, les barres du haut, de gauche et de droite, le champ de réponse et les actions (votes, Reply, Award, partage, menus) sont masqués. Le post et les commentaires sont recentrés, dans le thème Reddit actuel. Le tri, la recherche et les commandes pour déplier ou charger les réponses restent disponibles. La navigation habituelle revient en quittant le thread, y compris sans rechargement. Fonctionne sans clé API et sans ouvrir Distill.
 - **Synthèse** : arguments, objections, témoignages et interprétations, organisés selon le contenu du fil.
 - **Questions-réponses** : un parcours par sujet, avec les positions opposées dans leur contexte.
 - **Discussion** : post et commentaires récupérés, avec les messages parents et les liens d’origine.

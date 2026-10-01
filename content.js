@@ -226,8 +226,19 @@
   });
   function syncPage() {
     const next = currentThread();
+    document.documentElement.classList.toggle('reddit-distill-focus', Boolean(next));
     if (next !== threadId) { destroy(); threadId = next; }
     if (!next) { button?.remove(); button = null; return; }
+    // The post's action row lives in an open shadow root with no CSS part.
+    // Retry during page sync: Reddit can attach or replace it after navigation.
+    for (const post of document.querySelectorAll('shreddit-post')) {
+      const root = post.shadowRoot;
+      if (!root || root.getElementById('reddit-distill-focus-style')) continue;
+      const style = document.createElement('style');
+      style.id = 'reddit-distill-focus-style';
+      style.textContent = ':host-context(html.reddit-distill-focus) [data-testid="action-row"] { display: none !important; }';
+      root.append(style);
+    }
     if (!button) {
       button = document.createElement('button');
       button.id = 'reddit-distill-button';
