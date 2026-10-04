@@ -77,28 +77,22 @@
   }
   async function runRequest(message, active, controller) {
     const { signal } = controller;
-    let timedOut = false, timer, lastLoaded = -1, lastCompletedPages = -1;
-    const armTimeout = () => {
-      clearTimeout(timer);
-      timer = setTimeout(() => { timedOut = true; controller.abort(); }, message.action === 'collectPageComments' ? 150_000 : 20_000);
-    };
-    armTimeout();
+    let timedOut = false;
+    // The loader returns partial data at its own deadline. This watchdog is
+    // only a final safeguard and is never extended by progress messages.
+    const timer = setTimeout(() => { timedOut = true; controller.abort(); }, message.action === 'collectPageComments' ? 35_000 : 20_000);
     try {
       signal.throwIfAborted();
       let result;
       if (message.action === 'fetchRedditJson') result = await fetchRedditJson(message.request, active.threadId, signal);
       else {
         if (!globalThis.RedditDistillLoader?.collect) throw new Error('Le chargement automatique est indisponible. Recharge cette discussion Reddit.');
-        const collected = await globalThis.RedditDistillLoader.collect({ threadId: active.threadId, signal, onProgress(progress) {
+        const request = message.request;
+        if (request !== undefined && (!Number.isSafeInteger(request?.timeBudgetMs) || request.timeBudgetMs < 0 || request.timeBudgetMs > 30000 ||
+            !Array.isArray(request.knownCommentIds) || request.knownCommentIds.length > 15000 ||
+            !request.knownCommentIds.every((id) => typeof id === 'string' && /^t1_[a-z0-9]{1,32}$/.test(id)))) throw new Error('Requête Reddit invalide.');
+        const collected = await globalThis.RedditDistillLoader.collect({ ...request, threadId: active.threadId, signal, onProgress(progress) {
           if (signal.aborted || session !== active || currentThread() !== active.threadId) return;
-          // Productive collection may outlive the old fixed deadline. Repeated
-          // status messages alone must not keep a stalled request alive.
-          if ((Number.isSafeInteger(progress.loaded) && progress.loaded > lastLoaded) ||
-              (Number.isSafeInteger(progress.completedPages) && progress.completedPages > lastCompletedPages)) {
-            if (Number.isSafeInteger(progress.loaded)) lastLoaded = Math.max(lastLoaded, progress.loaded);
-            if (Number.isSafeInteger(progress.completedPages)) lastCompletedPages = Math.max(lastCompletedPages, progress.completedPages);
-            armTimeout();
-          }
           active.frame.contentWindow?.postMessage({ action: 'pageCollectionProgress', token: active.token, threadId: active.threadId,
             requestId: message.requestId, progress }, extensionOrigin);
         } });

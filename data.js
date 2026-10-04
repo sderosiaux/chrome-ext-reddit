@@ -3,6 +3,7 @@ const POST_ID = /^t3_[a-z0-9]+$/;
 const COMMENT_ID = /^t1_[a-z0-9]+$/;
 const REDDIT_ORIGIN = /^https:\/\/(?:www\.|old\.|new\.)?reddit\.com$/;
 const MAX_COMMENTS = 15000;
+const COLLECTION_TIME = 30000, API_TIME = 20000, IDLE_TIME = 5000;
 
 export function threadUrl(id, threadId) {
   const value = String(id || '');
@@ -94,7 +95,7 @@ async function getJson(url, signal, requestJson, request) {
     signal.throwIfAborted();
     // In the extension, Reddit requests run in its own tab so they have the
     // page's same-origin session. Direct fetch remains useful outside Chrome.
-    const response = requestJson ? await requestJson(request) : await fetch(url, {
+    const response = requestJson ? await requestJson(request, { signal }) : await fetch(url, {
       credentials: 'include', signal: AbortSignal.any([signal, AbortSignal.timeout(30_000)]),
       headers: { Accept: 'application/json' },
     });
@@ -171,6 +172,18 @@ export async function fetchThread(threadId, { signal, onProgress = () => {}, onS
   const branches = new Set(), branchAttempts = new Map(), unresolvedBranches = new Set();
   const errors = new Set();
   let root, malformed = false, problem = '', requests = 0;
+  const deadline = Date.now() + COLLECTION_TIME, apiDeadline = Date.now() + API_TIME;
+  const apiController = new AbortController();
+  const apiSignal = AbortSignal.any([signal, apiController.signal]);
+  const budgetReason = 'Le délai de collecte est atteint ; la lecture continue avec les commentaires récupérés.';
+  const idleReason = 'Reddit ne renvoie plus de nouveaux commentaires dans les réponses JSON.';
+  const timer = setTimeout(() => apiController.abort(new Error(budgetReason)), API_TIME);
+  let idleTimer, lastProgress = Date.now(), emptyResponses = 0;
+  function productive() {
+    lastProgress = Date.now(); emptyResponses = 0;
+    clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => apiController.abort(new Error(idleReason)), IDLE_TIME);
+  }
   function queue(child) {
     required.add(`t1_${child}`);
     if (!nodes.has(`t1_${child}`) && (attempts.get(child) || 0) < 3) pending.add(child);
@@ -200,11 +213,14 @@ export async function fetchThread(threadId, { signal, onProgress = () => {}, onS
   }
   try {
     onStatus('Récupération de la discussion depuis Reddit…');
-    const initial = listing(await getJson(endpoint.href, signal, requestJson, { kind: 'thread' }), rootId);
-    root = initial.root; collect(initial.things); onProgress(nodes.size);
+    const initial = listing(await getJson(endpoint.href, apiSignal, requestJson, { kind: 'thread' }), rootId);
+    root = initial.root; collect(initial.things); onProgress(nodes.size); productive();
     while (pending.size || branches.size) {
-      signal.throwIfAborted();
+      apiSignal.throwIfAborted();
+      if (Date.now() >= apiDeadline) { problem = budgetReason; break; }
+      if (Date.now() - lastProgress >= IDLE_TIME || emptyResponses >= 12) { problem = idleReason; break; }
       if (Math.max(nodes.size, required.size, branchAttempts.size) >= MAX_COMMENTS) { problem = 'La limite de sécurité de 15 000 commentaires ou branches a été atteinte.'; break; }
+      const before = nodes.size;
       requests++;
       if (pending.size) {
         for (const child of [...pending]) if (nodes.has(`t1_${child}`)) pending.delete(child);
@@ -217,12 +233,12 @@ export async function fetchThread(threadId, { signal, onProgress = () => {}, onS
         const url = new URL('/api/morechildren.json', origin);
         url.search = new URLSearchParams({ api_type: 'json', raw_json: '1', link_id: rootId, children: ids.join(','), sort: 'confidence' });
         try {
-          const response = await getJson(url.href, signal, requestJson, { kind: 'more', children: ids });
+          const response = await getJson(url.href, apiSignal, requestJson, { kind: 'more', children: ids });
           if (response?.json?.errors?.length || !Array.isArray(response?.json?.data?.things))
             throw new Error('Reddit n’a pas fourni toutes les réponses supplémentaires.');
           collect(response.json.data.things);
         } catch (error) {
-          signal.throwIfAborted(); errors.add(error.message);
+          apiSignal.throwIfAborted(); errors.add(error.message);
           if ([401, 403, 429].includes(error.status)) throw error;
         }
         for (const child of ids) queue(child);
@@ -233,19 +249,20 @@ export async function fetchThread(threadId, { signal, onProgress = () => {}, onS
         const url = new URL(endpoint);
         url.searchParams.set('comment', parent.slice(3)); url.searchParams.set('context', '0');
         try {
-          collect(listing(await getJson(url.href, signal, requestJson, { kind: 'thread', commentId: parent.slice(3) }), rootId).things);
+          collect(listing(await getJson(url.href, apiSignal, requestJson, { kind: 'thread', commentId: parent.slice(3) }), rootId).things);
         } catch (error) {
-          signal.throwIfAborted(); errors.add(error.message); unresolvedBranches.add(parent);
+          apiSignal.throwIfAborted(); errors.add(error.message); unresolvedBranches.add(parent);
           if ([401, 403, 429].includes(error.status)) throw error;
           if (branchAttempts.get(parent) < 2) branches.add(parent);
         }
       }
+      if (nodes.size > before) productive(); else emptyResponses++;
       onProgress(nodes.size);
     }
   } catch (error) {
     signal.throwIfAborted();
     problem = error.message || 'Le chargement Reddit a échoué.';
-  }
+  } finally { clearTimeout(timer); clearTimeout(idleTimer); }
   signal.throwIfAborted();
   const reported = Number.isSafeInteger(root?.num_comments) && root.num_comments >= 0 ? root.num_comments : null;
   const unresolvedIds = () => [...required].filter((name) => !nodes.has(name));
@@ -253,9 +270,9 @@ export async function fetchThread(threadId, { signal, onProgress = () => {}, onS
   const partialReason = 'Certains commentaires annoncés par Reddit restent inaccessibles après la collecte automatique.';
   if (!root || problem || incomplete || (reported !== null && nodes.size < reported)) {
     let page, collectionError;
-    if (collectComments) {
+    if (collectComments && Date.now() < deadline) {
       onStatus('Chargement automatique des réponses supplémentaires…');
-      try { page = await collectComments(); }
+      try { page = await collectComments({ knownCommentIds: [...nodes.keys()], timeBudgetMs: deadline - Date.now() }); }
       catch (error) { signal.throwIfAborted(); collectionError = error.message; }
     }
     if (!page) try { page = await getSnapshot?.(); } catch { signal.throwIfAborted(); }

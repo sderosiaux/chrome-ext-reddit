@@ -99,9 +99,9 @@ async function showView({ refresh = false, retry = false } = {}) {
     if (refresh || !thread) {
       progress('Lecture de la discussion…');
       const fetched = await fetchThread(threadId, { signal, origin: parentOrigin, getSnapshot: () => getSnapshot(signal),
-        requestJson: (request) => redditRequest('fetchRedditJson', signal, { request }),
-        collectComments: async () => {
-          const result = await redditRequest('collectPageComments', signal, { onProgress: (state) => {
+        requestJson: (request, { signal: requestSignal }) => redditRequest('fetchRedditJson', requestSignal, { request }),
+        collectComments: async (request) => {
+          const result = await redditRequest('collectPageComments', signal, { request, onProgress: (state) => {
             if (active === job) progress(state?.message || `Chargement automatique · ${state?.loaded || 0} commentaires`);
           } });
           signal.throwIfAborted();

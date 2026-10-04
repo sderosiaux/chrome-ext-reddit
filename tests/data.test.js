@@ -272,3 +272,54 @@ test('complementary API and exhausted page results can jointly complete the thre
   assert.equal(thread.coverage.loaded, 2);
   assert.equal(thread.coverage.reason, '');
 });
+
+test('API expansion and HTML fallback share one budget and pass already-known IDs', async (t) => {
+  let clock = 0, options, calls = 0;
+  t.mock.method(Date, 'now', () => clock);
+  const thread = await fetchThread('post1', {
+    requestJson: async (request, { signal }) => {
+      assert.ok(signal instanceof AbortSignal);
+      clock += 4000; calls++;
+      return { ok: true, data: request.kind === 'thread' ? listing([comment('a'), more(['b'])], 10)
+        : { json: { data: { things: [comment(`extra${calls}`), more([`next${calls}`])] } } } };
+    },
+    collectComments: async (request) => { options = request; return processThreadData(root(10), [comment('page').data], { source: 'page-auto' }); },
+  });
+  assert.equal(calls, 5, 'productive API work stops at twenty seconds');
+  assert.equal(options.timeBudgetMs, 10000, 'HTML gets only the remainder of thirty seconds');
+  assert.deepEqual(options.knownCommentIds, ['t1_a', 't1_extra2', 't1_extra3', 't1_extra4', 't1_extra5']);
+  assert.equal(thread.comments.length, 6, 'all API and page comments survive the deadline');
+  assert.equal(thread.coverage.complete, false);
+});
+
+test('empty successful API batches stop quickly instead of retrying hundreds of missing IDs', async (t) => {
+  let clock = 0, calls = 0;
+  t.mock.method(Date, 'now', () => clock);
+  const thread = await fetchThread('post1', { requestJson: async (request) => {
+    clock += 1000; calls++;
+    return { ok: true, data: request.kind === 'thread' ? listing([comment('a'), more(Array.from({ length: 500 }, (_, i) => `missing${i}`))], 501)
+      : { json: { data: { things: [] } } } };
+  } });
+  assert.equal(calls, 6);
+  assert.equal(thread.comments.length, 1);
+  assert.equal(thread.coverage.complete, false);
+  assert.match(thread.coverage.reason, /plus de nouveaux commentaires/);
+});
+
+test('an in-flight JSON request is cancelled at the idle deadline without losing earlier comments', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let requested, apiAborted = false;
+  const pendingRequest = new Promise((resolve) => { requested = resolve; });
+  const result = fetchThread('post1', { requestJson: async (request, { signal }) => {
+    if (request.kind === 'thread') return { ok: true, data: listing([comment('a'), more(['b'])], 2) };
+    requested();
+    return new Promise((resolve, reject) => signal.addEventListener('abort', () => { apiAborted = true; reject(signal.reason); }, { once: true }));
+  } });
+  await pendingRequest;
+  t.mock.timers.tick(5000);
+  const thread = await result;
+  assert.equal(apiAborted, true);
+  assert.equal(thread.comments.length, 1);
+  assert.equal(thread.coverage.complete, false);
+  assert.match(thread.coverage.reason, /plus de nouveaux commentaires/);
+});

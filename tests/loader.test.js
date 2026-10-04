@@ -230,7 +230,7 @@ test('POST cursors from nested detached HTML are followed with their parent cont
   window.close();
 });
 
-test('productive cursor pagination survives the former time, page and action limits', async () => {
+test('productive cursor pagination returns its accumulated comments at the total deadline', async () => {
   const { window, collect } = fixture(`${post(182)}<shreddit-comment-tree post-id="t3_post1">${comment('a')}${partial('0')}</shreddit-comment-tree>`);
   let clock = 0, calls = 0;
   window.Date.now = () => clock;
@@ -241,9 +241,10 @@ test('productive cursor pagination survives the former time, page and action lim
     return { ok: true, url, text: async () => `${comment(`c${offset}`)}${offset < 180 ? partial(String(offset + 1)) : ''}` };
   };
   const result = plain(await collect());
-  assert.equal(calls, 181);
-  assert.equal(result.comments.length, 182);
-  assert.equal(result.coverage.complete, true);
+  assert.equal(calls, 15);
+  assert.equal(result.comments.length, 16);
+  assert.equal(result.coverage.complete, false);
+  assert.match(result.coverage.reason, /délai de collecte/);
   window.close();
 });
 
@@ -298,7 +299,7 @@ test('live cursors are explored before a long list of unproductive continuation 
   window.close();
 });
 
-test('overlapping branches do not trigger an early stop before a later new comment', async () => {
+test('new cursor URLs with the same comments stop after five seconds without a new comment', async () => {
   const { window, collect } = fixture(`${post(2)}<shreddit-comment-tree post-id="t3_post1">${comment('a')}${partial('0')}</shreddit-comment-tree>`);
   let clock = 0, calls = 0;
   window.Date.now = () => clock;
@@ -308,7 +309,57 @@ test('overlapping branches do not trigger an early stop before a later new comme
     return { ok: true, url, text: async () => offset < 80 ? `${comment('a')}${partial(String(offset + 1))}` : comment('b') };
   };
   const result = plain(await collect());
-  assert.equal(calls, 81);
+  assert.equal(calls, 3);
+  assert.equal(result.comments.length, 1);
+  assert.equal(result.coverage.complete, false);
+  assert.match(result.coverage.reason, /plus de nouveaux commentaires/);
+  window.close();
+});
+
+test('comments already collected by the API do not buy more HTML traversal time', async () => {
+  const { window, collect } = fixture(`${post(100)}<shreddit-comment-tree post-id="t3_post1">${comment('a')}${partial('0')}</shreddit-comment-tree>`);
+  let calls = 0;
+  window.Date.now = () => 0;
+  window.fetch = async (url) => {
+    const offset = Number(new URL(url).searchParams.get('offset'));
+    calls++;
+    return { ok: true, url, text: async () => `${comment(`c${offset}`)}${partial(String(offset + 1))}` };
+  };
+  const updates = [];
+  const result = plain(await collect({ knownCommentIds: ['t1_a', ...Array.from({ length: 99 }, (_, i) => `t1_c${i}`)], onProgress: (state) => updates.push(state.loaded) }));
+  assert.equal(calls, 12);
+  assert.equal(result.comments.length, 13);
+  assert.equal(result.coverage.complete, false);
+  assert.ok(updates.every((loaded) => loaded === 100), 'progress counts the union without going backwards');
+  window.close();
+});
+
+test('independent HTML branches use at most three concurrent requests and preserve every result', async () => {
+  const { window, collect } = fixture(`${post(7)}<shreddit-comment-tree post-id="t3_post1">${comment('a')}${Array.from({ length: 6 }, (_, i) => partial(String(i))).join('')}</shreddit-comment-tree>`);
+  let active = 0, peak = 0;
+  window.fetch = async (url) => {
+    active++; peak = Math.max(peak, active);
+    await new Promise((resolve) => setImmediate(resolve));
+    active--;
+    return { ok: true, url, text: async () => comment(`c${new URL(url).searchParams.get('offset')}`) };
+  };
+  const result = plain(await collect());
+  assert.equal(peak, 3);
+  assert.equal(result.comments.length, 7);
   assert.equal(result.coverage.complete, true);
+  window.close();
+});
+
+test('the remaining shared budget aborts an in-flight HTML fetch and keeps collected comments', async () => {
+  const { window, collect } = fixture(`${post(2)}<shreddit-comment-tree post-id="t3_post1">${comment('a')}${partial()}</shreddit-comment-tree>`);
+  let aborted = false;
+  window.fetch = (url, { signal }) => new Promise((resolve, reject) => {
+    signal.addEventListener('abort', () => { aborted = true; reject(signal.reason); }, { once: true });
+  });
+  const result = plain(await collect({ timeBudgetMs: 1000 }));
+  assert.equal(aborted, true);
+  assert.equal(result.comments.length, 1);
+  assert.equal(result.coverage.complete, false);
+  assert.match(result.coverage.reason, /délai de collecte/);
   window.close();
 });

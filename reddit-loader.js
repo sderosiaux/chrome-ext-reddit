@@ -5,9 +5,9 @@
   const SCOPE = 'shreddit-comment-tree,.commentarea';
   const MORE = /^(?:(?:load|show|view|see)\s+(?:\d+\s+)?more\s+(?:comments?|repl(?:y|ies))|(?:\d+\s+)?more\s+(?:comments?|repl(?:y|ies))|continue\s+(?:this\s+)?thread|(?:afficher|voir|charger)\s+(?:\d+\s+)?(?:plus|d[’']autres)\s+(?:de\s+)?(?:commentaires|réponses)|continuer\s+(?:ce|le)\s+fil)(?:\b|\s|$)/i;
   const EXPAND = /^(?:expand comment|expand thread|show comment|développer le commentaire|afficher le commentaire|développer les réponses)$/i;
-  // A large thread must not stop while it is still making progress. Bound
-  // stalled work and total data instead of elapsed time or successful actions.
-  const MAX_COMMENTS = 15000, MAX_IDLE_TIME = 60000;
+  // The reader must start even when Reddit keeps offering overlapping branches.
+  // Only a new comment buys more idle time, never another visited URL.
+  const MAX_COMMENTS = 15000, MAX_TIME = 30000, MAX_IDLE_TIME = 5000, MAX_EMPTY_PAGES = 12;
 
   function threadAt(href) {
     try {
@@ -49,10 +49,12 @@
     return { ...before, ...richer, parent: parentId, links: richer.links || before.links || [] };
   }
 
-  async function collect({ threadId, signal, onProgress } = {}) {
+  async function collect({ threadId, signal, onProgress, knownCommentIds = [], timeBudgetMs = MAX_TIME } = {}) {
     const expected = threadId || threadAt(location.href);
     if (!expected || expected !== threadAt(location.href)) throw abortError();
-    const comments = new Map(), attempts = new Map(), pages = new Map();
+    const comments = new Map(), attempts = new Map(), pages = new Map(), seenIds = new Set(knownCommentIds);
+    const deadline = Date.now() + Math.max(0, Math.min(MAX_TIME, timeBudgetMs));
+    let emptyPages = 0;
     let snapshot, actions = 0, fetchedPages = 0, completedPages = 0, revision = 0, lastMutation = Date.now(), lastProgress = Date.now();
     let stopReason = '', observerError = null, captureQueued = false, finished = false;
     let savedScroll = null;
@@ -61,7 +63,7 @@
       if (observerError) throw observerError;
     };
     function progress(message, phase = 'collecting') {
-      onProgress?.({ phase, loaded: comments.size, reported: snapshot?.coverage?.reported ?? null, actions, completedPages, message });
+      onProgress?.({ phase, loaded: seenIds.size, reported: snapshot?.coverage?.reported ?? null, actions, completedPages, message });
     }
     function accumulate(thread) {
       if (thread.id !== expected) throw abortError();
@@ -71,15 +73,18 @@
         const next = mergeComment(previous, comment);
         if (!previous || previous.text !== next.text || previous.parent !== next.parent) changed = true;
         comments.set(comment.id, next);
+        if (!seenIds.has(comment.id)) {
+          seenIds.add(comment.id); lastProgress = Date.now(); emptyPages = 0;
+        }
       }
-      if (changed) { revision++; lastProgress = Date.now(); }
+      if (changed) revision++;
       return changed;
     }
     function capture() {
       check();
       const current = globalThis.RedditDistillDOM.extractThread(document, location.href);
       snapshot = current;
-      if (accumulate(current)) progress(`${comments.size} commentaires récupérés ; exploration des réponses…`);
+      if (accumulate(current)) progress(`${seenIds.size} commentaires récupérés ; exploration des réponses…`);
     }
     function delay(ms) {
       return new Promise((resolve, reject) => {
@@ -96,8 +101,8 @@
         capture();
         const elapsed = Date.now() - waitStarted;
         if (elapsed >= 300 && revision !== before && Date.now() - lastMutation >= 150) return;
-        if (elapsed >= 12000) return;
-      } while (Date.now() - lastProgress < MAX_IDLE_TIME);
+        if (elapsed >= 1500) return;
+      } while (Date.now() < deadline && Date.now() - lastProgress < MAX_IDLE_TIME);
     }
     function allowed(node) {
       const scope = closest(node, SCOPE);
@@ -206,7 +211,7 @@
       const controller = new AbortController();
       const abort = () => controller.abort();
       signal?.addEventListener('abort', abort, { once: true });
-      const timer = setTimeout(abort, 20000);
+      const timer = setTimeout(abort, Math.max(1, Math.min(8000, deadline - Date.now(), MAX_IDLE_TIME - (Date.now() - lastProgress))));
       try {
         check();
         const url = new URL(href);
@@ -246,7 +251,9 @@
           }
         }
         const thread = globalThis.RedditDistillDOM.extractThread(doc, task.key.startsWith('partial:') ? location.href : href, { contextParent });
+        const before = seenIds.size;
         accumulate(thread);
+        if (seenIds.size === before) emptyPages++;
         const discovered = discover(doc, href, contextParent);
         fetchedPages++;
         // Repeated cursors are unresolved, not an invitation to fetch forever.
@@ -255,10 +262,8 @@
         task.repeated = discovered.has(task.key);
         task.nativeControls = controls(doc).some((control) => !control.key.startsWith('partial:'));
         task.done = !task.repeated;
-        // Distinct completed branches also advance traversal, even when they
-        // overlap already collected comments. A repeated cursor does not.
-        if (task.done) { completedPages++; lastProgress = Date.now(); }
-        progress(`${comments.size} commentaires récupérés ; lecture des branches profondes…`);
+        if (task.done) completedPages++;
+        progress(`${seenIds.size} commentaires récupérés ; lecture des branches profondes…`);
       } finally { clearTimeout(timer); signal?.removeEventListener('abort', abort); }
     }
 
@@ -281,7 +286,8 @@
         capture();
         discover(document, location.href);
         if (comments.size >= MAX_COMMENTS || pages.size >= MAX_COMMENTS) { stopReason = 'La limite de sécurité de 15 000 commentaires ou branches a été atteinte.'; break; }
-        if (Date.now() - lastProgress >= MAX_IDLE_TIME) { stopReason = 'Le chargement ne progresse plus malgré les nouvelles tentatives.'; break; }
+        if (Date.now() >= deadline) { stopReason = 'Le délai de collecte est atteint ; la lecture continue avec les commentaires récupérés.'; break; }
+        if (Date.now() - lastProgress >= MAX_IDLE_TIME || emptyPages >= MAX_EMPTY_PAGES) { stopReason = 'Les dernières branches ne renvoient plus de nouveaux commentaires ; la lecture continue avec les commentaires récupérés.'; break; }
         // Fetch validated page-provided cursors directly. This also works when
         // the reader dialog makes the underlying page inert or a branch's HTML
         // has no running custom elements to handle its buttons.
@@ -290,11 +296,18 @@
         // waiting on all the other pending requests.
         const fallback = available.find((control) => !control.disabled && (attempts.get(control.key) || 0) < 2 && pages.get(control.key)?.tries >= 2);
         const pending = [...pages.values()].filter((state) => !state.done && state.tries < 2);
-        const task = !fallback && (pending.find((state) => state.key.startsWith('partial:')) || pending[0]);
-        if (task) {
-          idlePasses = 0; task.tries++; actions++;
-          try { await fetchPage(task); task.error = ''; }
-          catch (error) { check(); task.error = error.message; }
+        // Explore independent branches together, but keep native DOM actions
+        // sequential. Fresh cursors go before retries and full HTML pages.
+        pending.sort((a, b) => a.tries - b.tries || Number(b.key.startsWith('partial:')) - Number(a.key.startsWith('partial:')));
+        if (!fallback && pending.length) {
+          idlePasses = 0;
+          const results = await Promise.allSettled(pending.slice(0, 3).map(async (task) => {
+            task.tries++; actions++;
+            try { await fetchPage(task); task.error = ''; }
+            catch (error) { check(); task.error = error.message; emptyPages++; }
+          }));
+          const failed = results.find((result) => result.status === 'rejected');
+          if (failed) throw failed.reason;
           continue;
         }
         const next = fallback || available.find((control) => !control.disabled && (attempts.get(control.key) || 0) < 2);
@@ -303,7 +316,7 @@
           attempts.set(next.key, (attempts.get(next.key) || 0) + 1);
           actions++;
           const before = revision;
-          progress(`Chargement automatique des réponses (${comments.size} commentaires récupérés)…`);
+          progress(`Chargement automatique des réponses (${seenIds.size} commentaires récupérés)…`);
           if (next.kind === 'reveal') {
             if (!savedScroll) savedScroll = [window.scrollX, window.scrollY];
             next.node.scrollIntoView?.({ block: 'center', behavior: 'instant' });

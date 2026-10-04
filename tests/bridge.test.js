@@ -365,7 +365,7 @@ test('collection cannot publish stale progress after cancellation or navigation'
   }
 });
 
-test('collection timeout tracks actual progress instead of total duration or status chatter', async () => {
+test('collection watchdog cannot be extended by comments, overlapping branches or status chatter', async () => {
   let report;
   const app = contentHarness(URL_REDDIT, { collect: ({ signal, onProgress }) => {
     report = onProgress;
@@ -377,20 +377,13 @@ test('collection timeout tracks actual progress instead of total duration or sta
   assert.equal((await app.message(request)).collecting, true);
   const initial = [...app.timers.keys()][0];
   report({ loaded: 100 });
-  assert.equal(app.timers.has(initial), false);
-  const firstProgress = [...app.timers.keys()][0];
   report({ loaded: 101 });
-  assert.equal(app.timers.has(firstProgress), false);
-  const latest = [...app.timers.keys()][0];
   report({ loaded: 101, message: 'Still working' });
   report({ loaded: 100 });
-  assert.equal([...app.timers.keys()][0], latest);
   report({ loaded: 101, completedPages: 1 });
-  assert.equal(app.timers.has(latest), false, 'a newly completed overlapping branch still advances traversal');
-  const branchTimer = [...app.timers.keys()][0];
   report({ loaded: 101, completedPages: 1 });
-  assert.equal([...app.timers.keys()][0], branchTimer);
-  app.timers.get(branchTimer).fn();
+  assert.equal([...app.timers.keys()][0], initial);
+  app.timers.get(initial).fn();
   await flush();
   const result = await app.message(request);
   assert.equal(result.aborted, true);
@@ -417,6 +410,24 @@ test('collection polls return immediately, preserve one traversal, and use the a
   await relay.authorize();
   relay.chrome.tabs.sendMessage = async () => ({ ok: true, collecting: true });
   assert.deepEqual(await relay.send('collectPageComments', relay.panel, { requestId: 'long-collection' }), { ok: true, collecting: true });
+});
+
+test('collection relay forwards and bounds the remaining budget and known comment IDs', async () => {
+  const relay = backgroundHarness();
+  await relay.authorize();
+  const request = { knownCommentIds: ['t1_a', 't1_b'], timeBudgetMs: 12000 };
+  assert.equal((await relay.send('collectPageComments', relay.panel, { requestId: 'budget', request })).ok, true);
+  assert.deepEqual(JSON.parse(JSON.stringify(relay.calls.at(-1)[1].request)), request);
+  for (const invalid of [{ ...request, timeBudgetMs: 60000 }, { ...request, timeBudgetMs: -1 }, { ...request, knownCommentIds: ['t3_bad'] }]) {
+    assert.equal((await relay.send('collectPageComments', relay.panel, { requestId: 'invalid', request: invalid })).ok, false);
+  }
+  let options;
+  const app = contentHarness(URL_REDDIT, { collect: async (value) => { options = value; return { id: THREAD, comments: [] }; } });
+  await app.open(); await app.authorize();
+  await app.message({ action: 'collectPageComments', token: app.registration().token, threadId: THREAD, requestId: 'budget', request });
+  await flush();
+  assert.deepEqual(options.knownCommentIds, request.knownCommentIds);
+  assert.equal(options.timeBudgetMs, request.timeBudgetMs);
 });
 
 test('cancellation arriving before the initial request prevents a late fetch', async () => {

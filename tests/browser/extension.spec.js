@@ -89,6 +89,35 @@ async function openReader(page) {
   return frame;
 }
 
+test('839 known comments do not keep the reader waiting on overlapping HTML branches', async ({ context }) => {
+  let branches = 0;
+  const cursor = (i) => `<faceplate-partial src="/svc/shreddit/more-comments/r/ExperiencedDevs/t3_1wo8160?offset=${i}" method="post" loading="action"><input name="cursor" value="cursor-${i}"><button>More replies</button></faceplate-partial>`;
+  const payload = structuredClone(listing);
+  payload[0].data.children[0].data.num_comments = 865;
+  payload[1].data.children = [comment('a1', 't3_1wo8160', 'First'), comment('b2', 't1_a1', 'Reply'),
+    ...Array.from({ length: 837 }, (_, i) => comment(`c${i}`, 't3_1wo8160', `Comment ${i}`))];
+  await context.route(/^https:\/\/www\.reddit\.com\//, async (route) => {
+    const url = new URL(route.request().url());
+    if (url.pathname.endsWith('.json')) return route.fulfill({ json: payload });
+    if (url.pathname.startsWith('/svc/')) {
+      const i = Number(url.searchParams.get('offset'));
+      branches++;
+      return route.fulfill({ contentType: 'text/html', body: `<shreddit-comment thingid="t1_c${i}" parentid="t3_1wo8160"><div slot="comment">Comment ${i}</div></shreddit-comment>${cursor(i + 1)}` });
+    }
+    return route.fulfill({ contentType: 'text/html', body: fixture.replace('comment-count="3"', 'comment-count="865"')
+      .replace('</body>', `<shreddit-comment-tree post-id="t3_1wo8160">${cursor(0)}</shreddit-comment-tree></body>`) });
+  });
+  const page = await context.newPage();
+  await page.goto(THREAD);
+  const started = Date.now();
+  const frame = await openReader(page);
+  await expect(frame.locator('#coverage-title')).toContainText('839 commentaires lus', { timeout: 10000 });
+  await expect(frame.locator('#coverage-description')).toContainText('plus de nouveaux commentaires');
+  await expect(frame.locator('#settings-dialog')).toBeVisible();
+  expect(branches).toBeLessThanOrEqual(12);
+  expect(Date.now() - started).toBeLessThan(10000);
+});
+
 test('real extension: JSON pagination, key setup, sources, Q/R, cache and keyboard', async ({ context }, testInfo) => {
   const calls = await setup(context);
   const page = await context.newPage();
