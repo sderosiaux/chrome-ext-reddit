@@ -35,7 +35,7 @@ test('native modern loaders discover nested replies and preserve comments remove
   assert.equal(result.coverage.complete, true);
   assert.equal(result.coverage.source, 'page-auto');
   assert.equal(result.coverage.loaded, 3);
-  assert.ok(updates.some((event) => event.loaded === 3 && event.actions === 2));
+  assert.ok(updates.some((event) => event.loaded === 3));
   window.close();
 });
 
@@ -186,7 +186,7 @@ test('a cyclic comment graph is never declared complete', async () => {
 });
 
 
-test('native-only loaders in detached continuation HTML prevent false complete coverage', async () => {
+test('a repeated cursor in detached continuation HTML prevents false complete coverage', async () => {
   const { window, collect } = fixture(`${post(2)}<shreddit-comment-tree post-id="t3_post1">${comment('a')}<a slot="more-comments-permalink" href="/r/test/comments/post1/comment/a/">Continue this thread</a></shreddit-comment-tree>`);
   window.fetch = async (url) => ({ ok: true, url, text: async () => `${post(2)}<shreddit-comment-tree post-id="t3_post1">${comment('b', 't1_a')}${partial('detached')}</shreddit-comment-tree>` });
   const result = plain(await collect());
@@ -194,6 +194,7 @@ test('native-only loaders in detached continuation HTML prevent false complete c
   assert.equal(result.coverage.reported, 2);
   assert.equal(result.coverage.complete, false);
   assert.match(result.coverage.reason, /chargements/);
+  assert.match(result.coverage.reason, /même curseur/);
   window.close();
 });
 
@@ -203,5 +204,111 @@ test('an already-loading partial without a clickable button cannot prove exhaust
   const result = plain(await collect());
   assert.equal(result.coverage.loaded, 1);
   assert.equal(result.coverage.complete, false);
+  window.close();
+});
+
+test('POST cursors from nested detached HTML are followed with their parent context', async () => {
+  const { window, doc, collect } = fixture(`${post(3)}<shreddit-comment-tree post-id="t3_post1"><shreddit-comment thingid="t1_a"><div slot="comment">Parent</div>${partial()}</shreddit-comment></shreddit-comment-tree>`);
+  let clicks = 0;
+  doc.addEventListener('click', () => clicks++);
+  const cursors = [];
+  window.fetch = async (url, options) => {
+    assert.equal(options.method, 'POST');
+    assert.equal(options.credentials, 'include');
+    assert.equal(options.mode, 'same-origin');
+    cursors.push(options.body.get('cursor'));
+    return { ok: true, url, text: async () => url.includes('offset=one')
+      ? `<shreddit-comment thingid="t1_b" depth="1"><div slot="comment">Child</div>${partial('two')}</shreddit-comment>`
+      : '<shreddit-comment thingid="t1_c" depth="2"><div slot="comment">Grandchild</div></shreddit-comment>' };
+  };
+  const result = plain(await collect());
+  assert.deepEqual(cursors, ['cursor-one', 'cursor-two']);
+  assert.deepEqual(result.comments.map(({ id, parent }) => [id, parent]), [['t1_a', 't3_post1'], ['t1_b', 't1_a'], ['t1_c', 't1_b']]);
+  assert.equal(result.coverage.complete, true);
+  assert.equal(result.coverage.fetchedPages, 2);
+  assert.equal(clicks, 0, 'direct loading works while the underlying page is inert');
+  window.close();
+});
+
+test('productive cursor pagination survives the former time, page and action limits', async () => {
+  const { window, collect } = fixture(`${post(182)}<shreddit-comment-tree post-id="t3_post1">${comment('a')}${partial('0')}</shreddit-comment-tree>`);
+  let clock = 0, calls = 0;
+  window.Date.now = () => clock;
+  window.fetch = async (url) => {
+    const offset = Number(new URL(url).searchParams.get('offset'));
+    clock += 2000;
+    calls++;
+    return { ok: true, url, text: async () => `${comment(`c${offset}`)}${offset < 180 ? partial(String(offset + 1)) : ''}` };
+  };
+  const result = plain(await collect());
+  assert.equal(calls, 181);
+  assert.equal(result.comments.length, 182);
+  assert.equal(result.coverage.complete, true);
+  window.close();
+});
+
+test('cursor-only fragments are explored instead of being discarded as empty pages', async () => {
+  const { window, collect } = fixture(`${post(2)}<shreddit-comment-tree post-id="t3_post1">${comment('a')}${partial()}</shreddit-comment-tree>`);
+  window.fetch = async (url) => ({ ok: true, url, text: async () => url.includes('offset=one') ? partial('two') : comment('b') });
+  const result = plain(await collect());
+  assert.equal(result.coverage.complete, true);
+  assert.equal(result.coverage.fetchedPages, 2);
+  window.close();
+});
+
+test('streamed continuation templates expose comments and nested cursors without running scripts', async () => {
+  const { window, collect } = fixture(`${post(3)}<shreddit-comment-tree post-id="t3_post1">${comment('a')}<a slot="more-comments-permalink" href="/r/test/comments/post1/comment/a/">Continue this thread</a></shreddit-comment-tree>`);
+  const calls = [];
+  window.fetch = async (url) => {
+    calls.push(url);
+    return { ok: true, url, text: async () => url.includes('/comment/a/')
+      ? `${post(3)}<template for="s_8de66_0"><shreddit-comment-tree post-id="t3_post1">${comment('b', 't1_a')}<template for="nested">${partial('deep')}</template></shreddit-comment-tree></template><script>window.executed = true</script>`
+      : `<template for="next">${comment('c', 't1_b')}</template>` };
+  };
+  const result = plain(await collect());
+  assert.equal(result.coverage.complete, true);
+  assert.equal(result.comments.length, 3);
+  assert.equal(calls.length, 2);
+  assert.equal(window.executed, undefined);
+  window.close();
+});
+
+test('partial fetching rejects other origins, threads and non-read methods', async () => {
+  const invalid = partial('foreign').replace('/svc/', 'https://attacker.example/svc/') + partial('thread').replace('t3_post1?', 't3_other?') + partial('method').replace('method="post"', 'method="delete"');
+  const { window, collect } = fixture(`${post(1)}<shreddit-comment-tree post-id="t3_post1">${comment('a')}${invalid}</shreddit-comment-tree>`);
+  let calls = 0;
+  window.fetch = async () => { calls++; throw new Error('Must not fetch'); };
+  const result = plain(await collect());
+  assert.equal(calls, 0);
+  assert.equal(result.coverage.complete, true);
+  window.close();
+});
+
+test('live cursors are explored before a long list of unproductive continuation pages', async () => {
+  const links = Array.from({ length: 45 }, (_, i) => `<a slot="more-comments-permalink" href="/r/test/comments/post1/comment/c${i}/">Continue this thread</a>`).join('');
+  const { window, collect } = fixture(`${post(2)}<shreddit-comment-tree post-id="t3_post1">${comment('a')}${links}${partial()}</shreddit-comment-tree>`);
+  const calls = [];
+  window.fetch = async (url) => {
+    calls.push(url);
+    return { ok: true, url, text: async () => url.includes('/svc/') ? comment('b') : post(2) };
+  };
+  const result = plain(await collect());
+  assert.ok(calls[0].includes('/svc/shreddit/more-comments/'));
+  assert.equal(result.comments.length, 2);
+  window.close();
+});
+
+test('overlapping branches do not trigger an early stop before a later new comment', async () => {
+  const { window, collect } = fixture(`${post(2)}<shreddit-comment-tree post-id="t3_post1">${comment('a')}${partial('0')}</shreddit-comment-tree>`);
+  let clock = 0, calls = 0;
+  window.Date.now = () => clock;
+  window.fetch = async (url) => {
+    const offset = Number(new URL(url).searchParams.get('offset'));
+    clock += 2000; calls++;
+    return { ok: true, url, text: async () => offset < 80 ? `${comment('a')}${partial(String(offset + 1))}` : comment('b') };
+  };
+  const result = plain(await collect());
+  assert.equal(calls, 81);
+  assert.equal(result.coverage.complete, true);
   window.close();
 });

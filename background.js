@@ -103,7 +103,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
         action: message.action, token: message.token, threadId: record.threadId, requestId: message.requestId,
         ...(message.action === 'fetchRedditJson' ? { request: message.request } : {}),
       }, { frameId: 0, documentId: record.documentId });
-      if (message.action === 'collectPageComments' && result?.ok && result.thread?.id !== record.threadId)
+      if (message.action === 'collectPageComments' && result?.ok && !result.collecting && result.thread?.id !== record.threadId)
         return { ok: false, error: 'La discussion Reddit a changé. Rouvre Distill.' };
       return result || { ok: false, error: 'Impossible de joindre la discussion Reddit.' };
     }

@@ -13,6 +13,9 @@ test('vote fluctuations reuse notes while content, relationships and coverage in
   const original = await cacheKey(thread, settings, 'summary');
   const voted = structuredClone(thread); voted.comments[0].score = 2;
   assert.equal(await cacheKey(voted, settings, 'summary'), original);
+  const retried = structuredClone(thread);
+  Object.assign(retried.coverage, { requests: 12, actions: 84, fetchedPages: 55, exhausted: true, unresolved: 0 });
+  assert.equal(await cacheKey(retried, settings, 'summary'), original);
   for (const field of ['text', 'parent', 'author', 'permalink']) {
     const changed = structuredClone(thread); changed.comments[0][field] += 'changed';
     assert.notEqual(await cacheKey(changed, settings, 'summary'), original, field);

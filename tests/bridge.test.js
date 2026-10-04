@@ -324,8 +324,11 @@ test('automatic collection forwards progress and verifies the returned thread', 
     return { id: THREAD, comments: [{ id: 't1_abc' }] };
   } });
   await app.open(); await app.authorize();
-  const result = await app.message({ action: 'collectPageComments', token: app.registration().token,
-    threadId: THREAD, requestId: 'collection-1' });
+  const request = { action: 'collectPageComments', token: app.registration().token,
+    threadId: THREAD, requestId: 'collection-1' };
+  assert.deepEqual(await app.message(request), { ok: true, collecting: true });
+  await flush();
+  const result = await app.message(request);
   assert.equal(result.ok, true);
   assert.equal(result.thread.comments.length, 1);
   const [progress, origin] = app.posts.find(([message]) => message.action === 'pageCollectionProgress');
@@ -348,16 +351,72 @@ test('collection cannot publish stale progress after cancellation or navigation'
     } });
     await app.open(); await app.authorize();
     const credentials = { token: app.registration().token, threadId: THREAD, requestId: 'collect-stale' };
-    const pending = app.message({ action: 'collectPageComments', ...credentials });
+    assert.equal((await app.message({ action: 'collectPageComments', ...credentials })).collecting, true);
     if (action === 'cancel') await app.message({ action: 'cancelRedditRequest', ...credentials });
     else { app.location.href = 'https://www.reddit.com/comments/another/example/'; app.sync(); }
     report({ loaded: 99 });
-    assert.equal((await pending).aborted, true);
+    const result = await app.message({ action: 'collectPageComments', ...credentials });
+    assert.equal(result.ok, false);
+    if (action === 'cancel') assert.equal(result.aborted, true);
     const progress = app.posts.filter(([message]) => message.action === 'pageCollectionProgress');
     assert.equal(progress.length, 1);
     assert.equal(progress[0][0].progress.loaded, 2);
     assert.equal(progress[0][1], EXTENSION_ORIGIN);
   }
+});
+
+test('collection timeout tracks actual progress instead of total duration or status chatter', async () => {
+  let report;
+  const app = contentHarness(URL_REDDIT, { collect: ({ signal, onProgress }) => {
+    report = onProgress;
+    return fetchUntilAborted('', { signal });
+  } });
+  await app.open(); await app.authorize();
+  const request = { action: 'collectPageComments', token: app.registration().token,
+    threadId: THREAD, requestId: 'productive-collection' };
+  assert.equal((await app.message(request)).collecting, true);
+  const initial = [...app.timers.keys()][0];
+  report({ loaded: 100 });
+  assert.equal(app.timers.has(initial), false);
+  const firstProgress = [...app.timers.keys()][0];
+  report({ loaded: 101 });
+  assert.equal(app.timers.has(firstProgress), false);
+  const latest = [...app.timers.keys()][0];
+  report({ loaded: 101, message: 'Still working' });
+  report({ loaded: 100 });
+  assert.equal([...app.timers.keys()][0], latest);
+  report({ loaded: 101, completedPages: 1 });
+  assert.equal(app.timers.has(latest), false, 'a newly completed overlapping branch still advances traversal');
+  const branchTimer = [...app.timers.keys()][0];
+  report({ loaded: 101, completedPages: 1 });
+  assert.equal([...app.timers.keys()][0], branchTimer);
+  app.timers.get(branchTimer).fn();
+  await flush();
+  const result = await app.message(request);
+  assert.equal(result.aborted, true);
+  assert.match(result.error, /trop de temps/);
+  assert.equal(app.timers.size, 0);
+});
+
+test('collection polls return immediately, preserve one traversal, and use the authenticated relay', async () => {
+  let finish, calls = 0;
+  const app = contentHarness(URL_REDDIT, { collect: () => {
+    calls++;
+    return new Promise((resolve) => { finish = resolve; });
+  } });
+  await app.open(); await app.authorize();
+  const request = { action: 'collectPageComments', token: app.registration().token, threadId: THREAD, requestId: 'long-collection' };
+  for (let i = 0; i < 5; i++) assert.deepEqual(await app.message(request), { ok: true, collecting: true });
+  assert.equal(calls, 1);
+  assert.equal((await app.message({ ...request, token: TOKEN })).ok, false);
+  finish({ id: THREAD, comments: [{ id: 't1_complete' }] });
+  await flush();
+  assert.equal((await app.message(request)).thread.comments[0].id, 't1_complete');
+  assert.equal(app.timers.size, 0);
+  const relay = backgroundHarness();
+  await relay.authorize();
+  relay.chrome.tabs.sendMessage = async () => ({ ok: true, collecting: true });
+  assert.deepEqual(await relay.send('collectPageComments', relay.panel, { requestId: 'long-collection' }), { ok: true, collecting: true });
 });
 
 test('cancellation arriving before the initial request prevents a late fetch', async () => {

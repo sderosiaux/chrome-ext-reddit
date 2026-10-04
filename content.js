@@ -77,8 +77,12 @@
   }
   async function runRequest(message, active, controller) {
     const { signal } = controller;
-    let timedOut = false;
-    const timer = setTimeout(() => { timedOut = true; controller.abort(); }, message.action === 'collectPageComments' ? 150_000 : 20_000);
+    let timedOut = false, timer, lastLoaded = -1, lastCompletedPages = -1;
+    const armTimeout = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => { timedOut = true; controller.abort(); }, message.action === 'collectPageComments' ? 150_000 : 20_000);
+    };
+    armTimeout();
     try {
       signal.throwIfAborted();
       let result;
@@ -87,6 +91,14 @@
         if (!globalThis.RedditDistillLoader?.collect) throw new Error('Le chargement automatique est indisponible. Recharge cette discussion Reddit.');
         const collected = await globalThis.RedditDistillLoader.collect({ threadId: active.threadId, signal, onProgress(progress) {
           if (signal.aborted || session !== active || currentThread() !== active.threadId) return;
+          // Productive collection may outlive the old fixed deadline. Repeated
+          // status messages alone must not keep a stalled request alive.
+          if ((Number.isSafeInteger(progress.loaded) && progress.loaded > lastLoaded) ||
+              (Number.isSafeInteger(progress.completedPages) && progress.completedPages > lastCompletedPages)) {
+            if (Number.isSafeInteger(progress.loaded)) lastLoaded = Math.max(lastLoaded, progress.loaded);
+            if (Number.isSafeInteger(progress.completedPages)) lastCompletedPages = Math.max(lastCompletedPages, progress.completedPages);
+            armTimeout();
+          }
           active.frame.contentWindow?.postMessage({ action: 'pageCollectionProgress', token: active.token, threadId: active.threadId,
             requestId: message.requestId, progress }, extensionOrigin);
         } });
@@ -103,7 +115,9 @@
       ...(signal.aborted ? { aborted: true } : {}) };
     } finally {
       clearTimeout(timer);
-      if (requests.get(message.requestId) === controller) requests.delete(message.requestId);
+      // Collection results stay in this document until the reader's next poll.
+      // No service-worker message needs to remain open for the whole traversal.
+      if (!controller.collecting && requests.get(message.requestId) === controller) requests.delete(message.requestId);
     }
   }
   function open() {
@@ -192,11 +206,18 @@
         cancelledRequests.add(message.requestId);
         if (cancelledRequests.size > 256) cancelledRequests.delete(cancelledRequests.values().next().value);
         requests.get(message.requestId)?.abort();
+        requests.delete(message.requestId);
         respond({ ok: true });
         return;
       }
       if (cancelledRequests.has(message.requestId)) {
         respond({ ok: false, aborted: true, error: 'Chargement Reddit annulé.' });
+        return;
+      }
+      const running = requests.get(message.requestId);
+      if (message.action === 'collectPageComments' && running?.collecting) {
+        if (running.result) requests.delete(message.requestId);
+        respond(running.result || { ok: true, collecting: true });
         return;
       }
       if (requests.has(message.requestId) || requests.size >= 8 || (message.action === 'collectPageComments' &&
@@ -207,7 +228,13 @@
       const controller = new AbortController();
       controller.collecting = message.action === 'collectPageComments';
       requests.set(message.requestId, controller);
-      runRequest(message, session, controller).then(respond);
+      const pending = runRequest(message, session, controller);
+      if (controller.collecting) {
+        pending.then((result) => { if (requests.get(message.requestId) === controller) controller.result = result; });
+        respond({ ok: true, collecting: true });
+        return;
+      }
+      pending.then(respond);
       return true;
     }
     if (message?.action === 'readPageSnapshot') {

@@ -5,7 +5,9 @@
   const SCOPE = 'shreddit-comment-tree,.commentarea';
   const MORE = /^(?:(?:load|show|view|see)\s+(?:\d+\s+)?more\s+(?:comments?|repl(?:y|ies))|(?:\d+\s+)?more\s+(?:comments?|repl(?:y|ies))|continue\s+(?:this\s+)?thread|(?:afficher|voir|charger)\s+(?:\d+\s+)?(?:plus|d[’']autres)\s+(?:de\s+)?(?:commentaires|réponses)|continuer\s+(?:ce|le)\s+fil)(?:\b|\s|$)/i;
   const EXPAND = /^(?:expand comment|expand thread|show comment|développer le commentaire|afficher le commentaire|développer les réponses)$/i;
-  const MAX_ACTIONS = 180, MAX_PAGES = 80, MAX_COMMENTS = 15000, MAX_TIME = 105000;
+  // A large thread must not stop while it is still making progress. Bound
+  // stalled work and total data instead of elapsed time or successful actions.
+  const MAX_COMMENTS = 15000, MAX_IDLE_TIME = 60000;
 
   function threadAt(href) {
     try {
@@ -50,16 +52,16 @@
   async function collect({ threadId, signal, onProgress } = {}) {
     const expected = threadId || threadAt(location.href);
     if (!expected || expected !== threadAt(location.href)) throw abortError();
-    const started = Date.now(), comments = new Map(), attempts = new Map(), pages = new Map();
-    let snapshot, actions = 0, fetchedPages = 0, revision = 0, lastMutation = Date.now();
-    let stoppedByLimit = false, observerError = null, captureQueued = false, finished = false;
+    const comments = new Map(), attempts = new Map(), pages = new Map();
+    let snapshot, actions = 0, fetchedPages = 0, completedPages = 0, revision = 0, lastMutation = Date.now(), lastProgress = Date.now();
+    let stopReason = '', observerError = null, captureQueued = false, finished = false;
     let savedScroll = null;
     const check = () => {
       if (signal?.aborted || threadAt(location.href) !== expected) throw abortError();
       if (observerError) throw observerError;
     };
     function progress(message, phase = 'collecting') {
-      onProgress?.({ phase, loaded: comments.size, reported: snapshot?.coverage?.reported ?? null, actions, message });
+      onProgress?.({ phase, loaded: comments.size, reported: snapshot?.coverage?.reported ?? null, actions, completedPages, message });
     }
     function accumulate(thread) {
       if (thread.id !== expected) throw abortError();
@@ -70,7 +72,7 @@
         if (!previous || previous.text !== next.text || previous.parent !== next.parent) changed = true;
         comments.set(comment.id, next);
       }
-      if (changed) revision++;
+      if (changed) { revision++; lastProgress = Date.now(); }
       return changed;
     }
     function capture() {
@@ -93,9 +95,9 @@
         await delay(150);
         capture();
         const elapsed = Date.now() - waitStarted;
-        if (elapsed >= 650 && revision !== before && Date.now() - lastMutation >= 250) return;
-        if (elapsed >= 2400) return;
-      } while (Date.now() - started < MAX_TIME);
+        if (elapsed >= 300 && revision !== before && Date.now() - lastMutation >= 150) return;
+        if (elapsed >= 12000) return;
+      } while (Date.now() - lastProgress < MAX_IDLE_TIME);
     }
     function allowed(node) {
       const scope = closest(node, SCOPE);
@@ -129,6 +131,35 @@
       }
       return found;
     }
+    function partialRequest(partial, base = location.href) {
+      let url;
+      try { url = new URL(partial.getAttribute('src'), base); } catch { return null; }
+      // Only replay Reddit's read-only comment loader, never an arbitrary form
+      // or endpoint from page markup. No credentials are read from the DOM.
+      if (url.origin !== location.origin || !url.pathname.startsWith('/svc/shreddit/more-comments/') ||
+          !url.pathname.split('/').includes(expected)) return null;
+      const method = (partial.getAttribute('method') || 'get').toUpperCase();
+      if (!['GET', 'POST'].includes(method)) return null;
+      const cursor = partial.querySelector('input[name="cursor"]')?.value || '';
+      const owner = closest(partial, COMMENT);
+      const contextParent = owner?.getAttribute('thingid') || owner?.getAttribute('comment-id') || owner?.getAttribute('data-fullname');
+      return { href: url.href, method, cursor, contextParent,
+        key: `partial:${method}:${url.href}:${cursor}` };
+    }
+    function discover(doc, base, contextParent) {
+      const keys = new Set();
+      const add = (request) => {
+        keys.add(request.key);
+        if (!pages.has(request.key)) pages.set(request.key, { ...request, tries: 0, done: false });
+      };
+      for (const href of pageLinks(doc, base)) add({ key: href, href, method: 'GET' });
+      for (const partial of query(doc, 'faceplate-partial[src]')) {
+        if (hidden(partial) || (doc === document && !allowed(partial))) continue;
+        const request = partialRequest(partial, base);
+        if (request) add({ ...request, contextParent: request.contextParent || contextParent });
+      }
+      return keys;
+    }
     function controls(root = document) {
       const result = [], seen = new Set();
       function add(node, kind, key) {
@@ -137,12 +168,9 @@
         result.push({ node, kind, key, disabled: kind === 'pending' || node.disabled || node.getAttribute('aria-disabled') === 'true' });
       }
       for (const partial of query(root, 'faceplate-partial[src]')) {
-        const src = partial.getAttribute('src') || '';
-        let url;
-        try { url = new URL(src, location.href); } catch { continue; }
-        if (url.origin !== location.origin || !url.pathname.startsWith('/svc/shreddit/more-comments/') || !url.pathname.split('/').includes(expected)) continue;
-        const cursor = partial.querySelector('input[name="cursor"]')?.value || '';
-        const key = `partial:${url.href}:${hash(cursor)}`;
+        const request = partialRequest(partial);
+        if (!request || pages.get(request.key)?.done) continue;
+        const key = request.key;
         const button = [...partial.querySelectorAll('button[type="button"],button:not([type])')].find((item) => closest(item, 'faceplate-partial') === partial && !hidden(item) && !/^loading$/i.test(item.getAttribute('aria-label') || ''));
         if (button) add(button, 'click', key);
         else if (partial.getAttribute('loading') === 'lazy') add(partial, 'reveal', key);
@@ -173,37 +201,64 @@
       }
       return result;
     }
-    async function fetchPage(href) {
+    async function fetchPage(task) {
+      const { href, method, cursor, contextParent } = task;
       const controller = new AbortController();
       const abort = () => controller.abort();
       signal?.addEventListener('abort', abort, { once: true });
-      const timer = setTimeout(abort, Math.min(12000, MAX_TIME - (Date.now() - started)));
+      const timer = setTimeout(abort, 20000);
       try {
         check();
-        const response = await fetch(href, { credentials: 'include', mode: 'same-origin', redirect: 'follow', signal: controller.signal, headers: { Accept: 'text/html' } });
+        const url = new URL(href);
+        if (method === 'GET' && cursor) url.searchParams.set('cursor', cursor);
+        const response = await fetch(url.href, { method, ...(method === 'POST' ? { body: new URLSearchParams({ cursor }) } : {}),
+          credentials: 'include', mode: 'same-origin', redirect: 'follow', signal: controller.signal, headers: { Accept: 'text/html' } });
         check();
-        if (!response.ok) throw new Error(`Reddit : HTTP ${response.status}`);
-        if (response.url && !continuation(response.url)) throw new Error('Reddit a renvoyé une autre page.');
+        if (!response.ok) throw new Error(`Reddit : HTTP ${response.status}.`);
+        if (response.url && response.url !== url.href && !continuation(response.url)) throw new Error('Reddit a renvoyé une autre page.');
         const body = await response.text();
         if (body.length > 8000000) throw new Error('La page Reddit dépasse la taille de lecture.');
         check();
         const doc = new DOMParser().parseFromString(body, 'text/html');
-        if (!doc.querySelector('shreddit-post,.thing.link[data-fullname]') && doc.querySelector(COMMENT)) {
+        // Reddit streams continuation trees inside <template for="…">. DOM
+        // queries do not enter template.content, and detached pages never run
+        // Reddit's hydration script. Unwrap these fragments only in this inert
+        // document, including nested chunks, without executing page scripts.
+        let template;
+        while ((template = doc.querySelector('template[for],template[shadowrootmode]'))) {
+          // A response consisting only of a template is parsed into <head>.
+          if (template.closest('head')) { doc.body.append(template.content); template.remove(); }
+          else template.replaceWith(template.content);
+        }
+        if (!doc.querySelector('shreddit-post,.thing.link[data-fullname]') && (doc.querySelector(COMMENT) ||
+            [...doc.querySelectorAll('faceplate-partial[src]')].some((node) => partialRequest(node, href)))) {
           // Some continuation responses consist only of their comment branch.
           // The request URL proves its thread; explicit foreign comment ids are
           // still rejected by the DOM extractor's ancestry validation.
           const post = [...document.querySelectorAll('shreddit-post,.thing.link[data-fullname]')].find((node) => [node.getAttribute('post-id'), node.getAttribute('data-fullname'), node.id].includes(expected));
-          if (post) doc.body.prepend(post.cloneNode(true));
+          if (post) {
+            const scope = doc.createElement('shreddit-comment-tree');
+            scope.setAttribute('post-id', expected);
+            scope.append(...doc.body.childNodes);
+            // Clone into the inert document: cloning in the live page would
+            // run Reddit custom-element constructors before adoption.
+            doc.body.append(doc.importNode(post, true), scope);
+          }
         }
-        const thread = globalThis.RedditDistillDOM.extractThread(doc, href);
+        const thread = globalThis.RedditDistillDOM.extractThread(doc, task.key.startsWith('partial:') ? location.href : href, { contextParent });
         accumulate(thread);
-        for (const next of pageLinks(doc, href)) if (!pages.has(next)) pages.set(next, { tries: 0, done: false });
+        const discovered = discover(doc, href, contextParent);
         fetchedPages++;
+        // Repeated cursors are unresolved, not an invitation to fetch forever.
+        // Known partials are queued above even in detached HTML; unsupported
+        // native-only controls must still prevent a false complete claim.
+        task.repeated = discovered.has(task.key);
+        task.nativeControls = controls(doc).some((control) => !control.key.startsWith('partial:'));
+        task.done = !task.repeated;
+        // Distinct completed branches also advance traversal, even when they
+        // overlap already collected comments. A repeated cursor does not.
+        if (task.done) { completedPages++; lastProgress = Date.now(); }
         progress(`${comments.size} commentaires récupérés ; lecture des branches profondes…`);
-        // Native event handlers do not run in a detached HTML document. A
-        // remaining loader is evidence of unread branches even if Reddit's
-        // displayed count is stale or happens to equal the collected count.
-        return controls(doc).length > 0;
       } finally { clearTimeout(timer); signal?.removeEventListener('abort', abort); }
     }
 
@@ -224,10 +279,25 @@
       let idlePasses = 0;
       while (true) {
         capture();
-        for (const href of pageLinks(document, location.href)) if (!pages.has(href)) pages.set(href, { tries: 0, done: false });
-        if (Date.now() - started >= MAX_TIME || actions >= MAX_ACTIONS || fetchedPages >= MAX_PAGES || comments.size >= MAX_COMMENTS) { stoppedByLimit = true; break; }
+        discover(document, location.href);
+        if (comments.size >= MAX_COMMENTS || pages.size >= MAX_COMMENTS) { stopReason = 'La limite de sécurité de 15 000 commentaires ou branches a été atteinte.'; break; }
+        if (Date.now() - lastProgress >= MAX_IDLE_TIME) { stopReason = 'Le chargement ne progresse plus malgré les nouvelles tentatives.'; break; }
+        // Fetch validated page-provided cursors directly. This also works when
+        // the reader dialog makes the underlying page inert or a branch's HTML
+        // has no running custom elements to handle its buttons.
         const available = controls();
-        const next = available.find((control) => !control.disabled && (attempts.get(control.key) || 0) < 2);
+        // When a direct request fails, try its live native control before
+        // waiting on all the other pending requests.
+        const fallback = available.find((control) => !control.disabled && (attempts.get(control.key) || 0) < 2 && pages.get(control.key)?.tries >= 2);
+        const pending = [...pages.values()].filter((state) => !state.done && state.tries < 2);
+        const task = !fallback && (pending.find((state) => state.key.startsWith('partial:')) || pending[0]);
+        if (task) {
+          idlePasses = 0; task.tries++; actions++;
+          try { await fetchPage(task); task.error = ''; }
+          catch (error) { check(); task.error = error.message; }
+          continue;
+        }
+        const next = fallback || available.find((control) => !control.disabled && (attempts.get(control.key) || 0) < 2);
         if (next) {
           idlePasses = 0;
           attempts.set(next.key, (attempts.get(next.key) || 0) + 1);
@@ -239,16 +309,11 @@
             next.node.scrollIntoView?.({ block: 'center', behavior: 'instant' });
           } else next.node.click();
           await settle(before);
-          continue;
-        }
-        const page = [...pages].find(([, state]) => !state.done && state.tries < 2);
-        if (page) {
-          idlePasses = 0;
-          const [href, state] = page;
-          state.tries++;
-          actions++;
-          try { state.nativeControls = await fetchPage(href); state.done = true; }
-          catch (error) { check(); state.error = error.message; }
+          // A productive control can be reused (some Reddit versions keep the
+          // same element and cursor). Only consecutive failures exhaust it.
+          if (revision !== before) attempts.delete(next.key);
+          const task = pages.get(next.key);
+          if (task && !next.node.isConnected && revision !== before) { task.done = true; task.error = ''; }
           continue;
         }
         // Leave time for a pending native lazy loader or Reddit hydration to
@@ -272,18 +337,22 @@
         for (const parentId of branch) connected.add(parentId);
         return false;
       });
-      const complete = !stoppedByLimit && !unresolved && !missingParents && reported !== null && comments.size >= reported;
-      let reason = '';
+      const exhausted = !stopReason && !unresolved;
+      const complete = exhausted && !missingParents && reported !== null && comments.size >= reported;
+      let reason = '', diagnostic = '';
       if (!complete) {
-        reason = stoppedByLimit ? 'L’exploration automatique a atteint sa limite pour cette lecture.'
-          : missingParents ? 'Certains commentaires parents ne sont pas accessibles dans les branches renvoyées par Reddit.'
+        reason = stopReason || (missingParents ? 'Certains commentaires parents ne sont pas accessibles dans les branches renvoyées par Reddit.'
           : detachedLoaders ? 'Certains chargements de branches Reddit restent incomplets après l’exploration automatique.'
           : unresolved ? 'Reddit n’a pas terminé certains chargements malgré les nouvelles tentatives automatiques.'
-            : 'Toutes les branches accessibles ont été explorées automatiquement.';
+            : 'Toutes les branches accessibles ont été explorées automatiquement.');
+        const failures = [...new Set([...pages.values()].filter((state) => !state.done).map((state) => state.error || (state.repeated ? 'Reddit a renvoyé le même curseur de pagination.' : '')).filter(Boolean))];
+        if (failures.length) reason += ` ${failures.join(' ')}`;
+        diagnostic = reason;
         if (reported !== null && comments.size < reported) reason += ` ${comments.size} commentaires récupérés sur ${reported} annoncés par Reddit.`;
         if (reported === null) reason += ' Reddit ne fournit pas de total vérifiable.';
       }
-      const result = { ...snapshot, comments: [...comments.values()], coverage: { source: 'page-auto', loaded: comments.size, reported, complete, reason } };
+      const result = { ...snapshot, comments: [...comments.values()], coverage: { source: 'page-auto', loaded: comments.size, reported,
+        complete, exhausted, reason, diagnostic, actions, fetchedPages, unresolved: [...pages.values()].filter((state) => !state.done).length } };
       progress(complete ? 'Tous les commentaires annoncés ont été récupérés.' : reason, 'complete');
       return result;
     } finally {

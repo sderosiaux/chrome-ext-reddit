@@ -74,6 +74,7 @@ test('never claims completeness when Reddit omits a requested comment', async (t
   assert.equal(thread.comments.length, 1);
   assert.equal(thread.coverage.complete, false);
   assert.match(thread.coverage.reason, /pas accessibles/);
+  assert.equal(calls, 4, 'one initial request and three bounded attempts for the missing ID');
 });
 
 test('uses the exact page snapshot on API block and marks it partial', async (t) => {
@@ -84,7 +85,8 @@ test('uses the exact page snapshot on API block and marks it partial', async (t)
   assert.equal(thread.coverage.complete, false);
   assert.equal(thread.coverage.loaded, 1);
   assert.match(thread.coverage.reason, /collecte automatique/);
-  assert.doesNotMatch(thread.coverage.reason, /Déplie|HTTP 403/);
+  assert.match(thread.coverage.reason, /HTTP 403/);
+  assert.doesNotMatch(thread.coverage.reason, /Déplie/);
   await assert.rejects(fetchThread('post1', { getSnapshot: async () => ({ ...page, id: 't3_other' }) }), /chargement automatique/);
 });
 
@@ -181,7 +183,8 @@ test('automatically collects unloaded page replies after API denial instead of r
 });
 
 test('automatic DOM collection merges API comments without hiding a remaining Reddit count gap', async () => {
-  const page = processThreadData(root(4), [comment('second').data], { source: 'page-auto', complete: false, reason: 'Certaines réponses restent inaccessibles.' });
+  const page = processThreadData(root(4), [comment('second').data], { source: 'page-auto', complete: false,
+    diagnostic: 'Certaines réponses restent inaccessibles.', reason: 'Certaines réponses restent inaccessibles. 1 commentaires récupérés sur 4 annoncés par Reddit.' });
   const thread = await fetchThread('post1', {
     requestJson: async () => ({ ok: true, data: listing([comment('first')], 4) }),
     collectComments: async () => page,
@@ -189,6 +192,8 @@ test('automatic DOM collection merges API comments without hiding a remaining Re
   assert.deepEqual(thread.comments.map(c => c.id), ['t1_first', 't1_second']);
   assert.equal(thread.coverage.complete, false);
   assert.match(thread.coverage.reason, /2 commentaires.*après la collecte automatique/);
+  assert.doesNotMatch(thread.coverage.reason, /1 commentaires récupérés/);
+  assert.match(thread.coverage.reason, /Certaines réponses restent inaccessibles/);
 });
 
 
@@ -223,4 +228,47 @@ test('page-only complete claims require every ancestor chain to reach the reques
     assert.equal(thread.comments.length, 1);
     assert.equal(thread.coverage.complete, false);
   }
+});
+
+test('recovers an 865-comment thread when successful morechildren batches are truncated', async () => {
+  const ids = Array.from({ length: 403 }, (_, i) => `extra${i}`);
+  const batches = [];
+  const thread = await fetchThread('post1', { requestJson: async (request) => {
+    if (request.kind === 'thread') return { ok: true, data: listing([
+      ...Array.from({ length: 462 }, (_, i) => comment(`initial${i}`)), more(ids),
+    ], 865) };
+    batches.push(request.children);
+    return { ok: true, data: { json: { data: { things: request.children.slice(0, 7).map((id) => comment(id)) } } } };
+  } });
+  assert.equal(thread.comments.length, 865);
+  assert.equal(thread.coverage.complete, true);
+  assert.equal(thread.coverage.reason, '');
+  assert.ok(batches.some((batch) => batch.length === 100));
+  assert.ok(batches.some((batch) => batch.length === 20));
+  assert.ok(batches.some((batch) => batch.length === 1));
+  assert.ok(batches.length > 100, 'productive expansion must outlive the old request cap');
+});
+
+test('a transient expansion error does not discard its IDs or remaining branches', async () => {
+  let moreCalls = 0;
+  const thread = await fetchThread('post1', { requestJson: async (request) => {
+    if (request.kind === 'thread') return { ok: true, data: listing([more(['a', 'b'])], 2) };
+    if (++moreCalls === 1) return { ok: false, status: 500 };
+    return { ok: true, data: { json: { data: { things: request.children.map((id) => comment(id)) } } } };
+  } });
+  assert.equal(thread.coverage.complete, true);
+  assert.equal(thread.comments.length, 2);
+  assert.equal(moreCalls, 2);
+});
+
+test('complementary API and exhausted page results can jointly complete the thread', async () => {
+  const page = processThreadData(root(2), [comment('b', 't1_a').data], { source: 'page-auto', complete: false, exhausted: true });
+  const thread = await fetchThread('post1', {
+    requestJson: async (request) => ({ ok: true, data: request.kind === 'thread' ? listing([comment('a'), more(['b'])], 2)
+      : { json: { data: { things: [] } } } }),
+    collectComments: async () => page,
+  });
+  assert.equal(thread.coverage.complete, true);
+  assert.equal(thread.coverage.loaded, 2);
+  assert.equal(thread.coverage.reason, '');
 });

@@ -47,7 +47,17 @@ async function redditRequest(action, signal, { request, onProgress } = {}) {
     signal.addEventListener('abort', aborted, { once: true });
   });
   try {
-    return await Promise.race([cancellation, chrome.runtime.sendMessage({ action, token, threadId, requestId, ...(request ? { request } : {}) })]);
+    const response = (async () => {
+      while (true) {
+        signal.throwIfAborted();
+        const result = await chrome.runtime.sendMessage({ action, token, threadId, requestId, ...(request ? { request } : {}) });
+        if (action !== 'collectPageComments' || !result?.collecting) return result;
+        // The authenticated relay remains short-lived even on a large thread.
+        // Collection and its progress continue independently in the Reddit tab.
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+      }
+    })();
+    return await Promise.race([cancellation, response]);
   } finally {
     signal.removeEventListener('abort', aborted);
     collectionListeners.delete(requestId);

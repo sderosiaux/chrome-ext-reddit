@@ -303,3 +303,35 @@ test('403 automatically expands missing replies while the reader dialog is open'
   await expect(frame.locator('#reader')).toContainText('automatically discovered');
   await expect(frame.locator('#coverage')).not.toContainText('Déplie');
 });
+
+test('streamed HTML and nested POST cursors complete collection under the reader dialog', async ({ context }) => {
+  await setup(context, { blocked: true });
+  await context.addInitScript(() => {
+    window.postConstructions = 0;
+    customElements.define('shreddit-post', class extends HTMLElement {
+      constructor() { super(); window.postConstructions++; }
+    });
+  });
+  const partial = (cursor) => `<faceplate-partial src="/svc/shreddit/more-comments/r/ExperiencedDevs/t3_1wo8160?batch=${cursor}" method="post" loading="action"><input name="cursor" value="${cursor}"><button type="button">More replies</button></faceplate-partial>`;
+  await context.route(THREAD, (route) => route.fulfill({ contentType: 'text/html', body: fixture.replace('comment-count="3"', 'comment-count="4"').replace('</body>', `<shreddit-comment-tree post-id="t3_1wo8160">${partial('first')}</shreddit-comment-tree></body>`) }));
+  const cursors = [];
+  await context.route('**/svc/shreddit/more-comments/**', async (route) => {
+    expect(route.request().method()).toBe('POST');
+    const cursor = new URLSearchParams(route.request().postData()).get('cursor');
+    cursors.push(cursor);
+    const body = cursor === 'first'
+      ? `<shreddit-comment thingid="t1_c3" parentid="t1_b2"><div slot="comment">First streamed reply.</div>${partial('second')}</shreddit-comment>`
+      : '<shreddit-comment thingid="t1_d4" depth="3"><div slot="comment">Deep streamed reply.</div></shreddit-comment>';
+    await route.fulfill({ contentType: 'text/html', body: `<template for="s_8de66_0">${body}</template>` });
+  });
+  const page = await context.newPage();
+  await page.goto(THREAD);
+  const frame = await openReader(page);
+  await expect(frame.locator('#coverage-title')).toContainText('4 commentaires lus');
+  await expect(frame.locator('#coverage')).toHaveAttribute('data-complete', 'true');
+  expect(cursors).toEqual(['first', 'second']);
+  expect(await page.evaluate(() => window.postConstructions)).toBe(1);
+  await frame.getByRole('button', { name: 'Fermer les paramètres' }).click();
+  await frame.getByRole('tab', { name: 'Discussion', exact: true }).click();
+  await expect(frame.locator('#reader')).toContainText('Deep streamed reply.');
+});

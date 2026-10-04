@@ -47,6 +47,12 @@ export async function cacheKey(thread, settings, mode) {
   // Reopening an unchanged discussion must not incur another paid generation.
   const { score: ignoredPostScore, ...post } = thread;
   const source = { ...post, comments: thread.comments.map(({ score, ...comment }) => comment) };
+  // Retry/action counts describe transport work, not the material analyzed.
+  // They must not trigger another paid generation for identical coverage.
+  if (thread.coverage) {
+    const { complete, loaded, reported, reason, source: transport } = thread.coverage;
+    source.coverage = { complete, loaded, reported, reason, source: transport };
+  }
   const data = JSON.stringify({ thread: source, mode, model: MODELS[settings.provider], version: PROMPT_VERSION,
     language: settings.language, detail: settings.detail, personalContext: settings.personalContext });
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(data));

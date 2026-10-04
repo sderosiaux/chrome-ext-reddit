@@ -48,7 +48,7 @@
     return /^t3_[a-z0-9]+$/.test(value) ? value : threadOfLink(attr(node, 'permalink'));
   }
 
-  function extractThread(doc = document, href = location.href) {
+  function extractThread(doc = document, href = location.href, { contextParent } = {}) {
     const url = new URL(href);
     if (!/^https:\/\/(?:www\.|old\.|new\.)?reddit\.com$/.test(url.origin))
       throw new Error('Cette page n’est pas une discussion Reddit.');
@@ -88,7 +88,8 @@
       const rawPermalink = attr(node, 'permalink') || commentLink?.getAttribute('href');
       const ownThread = threadOfContainer(node) || threadOfLink(rawPermalink);
       const scopeThread = threadOfContainer(scope) || threadOfContainer(scope.parentElement?.closest('shreddit-post,.thing.link[data-fullname]'));
-      const parent = FULLNAME.test(declaredParent) ? declaredParent : nameOf(parentNode) || (depth > 0 ? byDepth.get(depth - 1) : null) || ownThread || scopeThread || id;
+      const parent = FULLNAME.test(declaredParent) ? declaredParent : nameOf(parentNode) ||
+        (depth > 0 ? byDepth.get(depth - 1) || (/^t1_[a-z0-9]+$/.test(contextParent || '') ? contextParent : null) : null) || ownThread || scopeThread || id;
       const candidate = { node, commentId, parent, physicalParent: nameOf(parentNode), ownThread, scopeThread, rawPermalink };
       // Prefer an explicitly matching copy if Reddit temporarily duplicates a
       // comment during navigation; unrelated nodes are still available as

@@ -2,7 +2,7 @@
 const POST_ID = /^t3_[a-z0-9]+$/;
 const COMMENT_ID = /^t1_[a-z0-9]+$/;
 const REDDIT_ORIGIN = /^https:\/\/(?:www\.|old\.|new\.)?reddit\.com$/;
-const MAX_EXPANSION_REQUESTS = 100;
+const MAX_COMMENTS = 15000;
 
 export function threadUrl(id, threadId) {
   const value = String(id || '');
@@ -106,9 +106,9 @@ async function getJson(url, signal, requestJson, request) {
       // Do not hold the reader indefinitely for a server-imposed cooldown.
       if (wait <= 5000) { await delay(Math.max(250, wait), signal); continue; }
     }
-    if (!response.ok) throw new Error(response.status === 429
+    if (!response.ok) throw Object.assign(new Error(response.status === 429
       ? 'Reddit limite temporairement les requêtes (HTTP 429).'
-      : response.status ? `Reddit : HTTP ${response.status}.` : response.error || 'Impossible de joindre Reddit depuis cet onglet.');
+      : response.status ? `Reddit : HTTP ${response.status}.` : response.error || 'Impossible de joindre Reddit depuis cet onglet.'), { status: response.status });
     try { return requestJson ? response.data : await response.json(); }
     catch { throw new Error('Reddit n’a pas renvoyé les commentaires au format JSON.'); }
   }
@@ -167,8 +167,14 @@ export async function fetchThread(threadId, { signal, onProgress = () => {}, onS
   const rootId = `t3_${id}`;
   const endpoint = new URL(`/comments/${id}.json`, origin);
   endpoint.search = new URLSearchParams({ raw_json: '1', limit: '500', sort: 'confidence' });
-  const nodes = new Map(), pending = new Set(), attempted = new Set(), branches = new Set(), visitedBranches = new Set();
-  let root, incomplete = false, problem = '', requests = 0;
+  const nodes = new Map(), pending = new Set(), attempts = new Map(), required = new Set();
+  const branches = new Set(), branchAttempts = new Map(), unresolvedBranches = new Set();
+  const errors = new Set();
+  let root, malformed = false, problem = '', requests = 0;
+  function queue(child) {
+    required.add(`t1_${child}`);
+    if (!nodes.has(`t1_${child}`) && (attempts.get(child) || 0) < 3) pending.add(child);
+  }
   function collect(things) {
     const stack = [...things].reverse();
     while (stack.length) {
@@ -176,19 +182,19 @@ export async function fetchThread(threadId, { signal, onProgress = () => {}, onS
       if (!data) continue;
       if (thing.kind === 't1') {
         const name = data.name || `t1_${data.id}`;
-        if (!COMMENT_ID.test(name) || (data.link_id && data.link_id !== rootId)) { incomplete = true; continue; }
+        if (!COMMENT_ID.test(name) || (data.link_id && data.link_id !== rootId)) { malformed = true; continue; }
         nodes.set(name, { ...data, name }); pending.delete(name.slice(3));
         if (Array.isArray(data.replies?.data?.children)) stack.push(...[...data.replies.data.children].reverse());
       } else if (thing.kind === 'more') {
         if (Array.isArray(data.children) && data.children.length) {
           for (const child of data.children) {
-            if (!/^[a-z0-9]+$/.test(child)) { incomplete = true; continue; }
-            if (!nodes.has(`t1_${child}`) && !attempted.has(child)) pending.add(child);
+            if (!/^[a-z0-9]+$/.test(child)) { malformed = true; continue; }
+            queue(child);
           }
         } else if (COMMENT_ID.test(data.parent_id)) {
-          if (!visitedBranches.has(data.parent_id)) branches.add(data.parent_id);
-          else incomplete = true;
-        } else if (data.count > 0) incomplete = true;
+          unresolvedBranches.add(data.parent_id);
+          if ((branchAttempts.get(data.parent_id) || 0) < 2) branches.add(data.parent_id);
+        } else if (data.count > 0) malformed = true;
       }
     }
   }
@@ -198,25 +204,41 @@ export async function fetchThread(threadId, { signal, onProgress = () => {}, onS
     root = initial.root; collect(initial.things); onProgress(nodes.size);
     while (pending.size || branches.size) {
       signal.throwIfAborted();
-      if (++requests > MAX_EXPANSION_REQUESTS) { problem = 'La limite de chargement a été atteinte ; une partie des réponses reste inaccessible.'; break; }
+      if (Math.max(nodes.size, required.size, branchAttempts.size) >= MAX_COMMENTS) { problem = 'La limite de sécurité de 15 000 commentaires ou branches a été atteinte.'; break; }
+      requests++;
       if (pending.size) {
-        const ids = [...pending].filter((child) => !nodes.has(`t1_${child}`)).slice(0, 100);
-        for (const child of ids) { pending.delete(child); attempted.add(child); }
         for (const child of [...pending]) if (nodes.has(`t1_${child}`)) pending.delete(child);
+        // Reddit can truncate a successful morechildren response. Retry only
+        // omitted IDs, in smaller batches, then individually. Never discard them.
+        const attempt = Math.min(...[...pending].map((child) => attempts.get(child) || 0));
+        const ids = [...pending].filter((child) => (attempts.get(child) || 0) === attempt).slice(0, [100, 20, 1][attempt]);
         if (!ids.length) continue;
+        for (const child of ids) { pending.delete(child); attempts.set(child, attempt + 1); }
         const url = new URL('/api/morechildren.json', origin);
         url.search = new URLSearchParams({ api_type: 'json', raw_json: '1', link_id: rootId, children: ids.join(','), sort: 'confidence' });
-        const response = await getJson(url.href, signal, requestJson, { kind: 'more', children: ids });
-        if (response?.json?.errors?.length || !Array.isArray(response?.json?.data?.things))
-          throw new Error('Reddit n’a pas fourni toutes les réponses supplémentaires.');
-        collect(response.json.data.things);
-        if (ids.some((child) => !nodes.has(`t1_${child}`))) incomplete = true;
+        try {
+          const response = await getJson(url.href, signal, requestJson, { kind: 'more', children: ids });
+          if (response?.json?.errors?.length || !Array.isArray(response?.json?.data?.things))
+            throw new Error('Reddit n’a pas fourni toutes les réponses supplémentaires.');
+          collect(response.json.data.things);
+        } catch (error) {
+          signal.throwIfAborted(); errors.add(error.message);
+          if ([401, 403, 429].includes(error.status)) throw error;
+        }
+        for (const child of ids) queue(child);
       } else {
         const parent = branches.values().next().value;
-        branches.delete(parent); visitedBranches.add(parent);
+        branches.delete(parent); unresolvedBranches.delete(parent);
+        branchAttempts.set(parent, (branchAttempts.get(parent) || 0) + 1);
         const url = new URL(endpoint);
         url.searchParams.set('comment', parent.slice(3)); url.searchParams.set('context', '0');
-        collect(listing(await getJson(url.href, signal, requestJson, { kind: 'thread', commentId: parent.slice(3) }), rootId).things);
+        try {
+          collect(listing(await getJson(url.href, signal, requestJson, { kind: 'thread', commentId: parent.slice(3) }), rootId).things);
+        } catch (error) {
+          signal.throwIfAborted(); errors.add(error.message); unresolvedBranches.add(parent);
+          if ([401, 403, 429].includes(error.status)) throw error;
+          if (branchAttempts.get(parent) < 2) branches.add(parent);
+        }
       }
       onProgress(nodes.size);
     }
@@ -226,7 +248,8 @@ export async function fetchThread(threadId, { signal, onProgress = () => {}, onS
   }
   signal.throwIfAborted();
   const reported = Number.isSafeInteger(root?.num_comments) && root.num_comments >= 0 ? root.num_comments : null;
-  if (!completeAncestry(nodes, rootId, 'parent_id')) incomplete = true;
+  const unresolvedIds = () => [...required].filter((name) => !nodes.has(name));
+  const incomplete = malformed || unresolvedIds().length > 0 || unresolvedBranches.size > 0 || !completeAncestry(nodes, rootId, 'parent_id');
   const partialReason = 'Certains commentaires annoncés par Reddit restent inaccessibles après la collecte automatique.';
   if (!root || problem || incomplete || (reported !== null && nodes.size < reported)) {
     let page, collectionError;
@@ -243,25 +266,31 @@ export async function fetchThread(threadId, { signal, onProgress = () => {}, onS
         Number.isSafeInteger(page.coverage.reported) && page.coverage.reported >= 0 &&
         pageNodes.size >= page.coverage.reported && completeAncestry(pageNodes, rootId, 'parent');
       if (!root) return { ...page, coverage: { ...page.coverage, complete: pageComplete, loaded: page.comments.length,
-        source: page.coverage?.source === 'page-auto' ? 'page-auto' : 'page', reason: pageComplete ? '' : collectionError || page.coverage?.reason || (/429/.test(problem) ? problem : partialReason) } };
+        source: page.coverage?.source === 'page-auto' ? 'page-auto' : 'page', reason: pageComplete ? '' :
+          [...new Set([collectionError, page.coverage?.reason, problem, partialReason].filter(Boolean))].join(' ') } };
       // Keep successful API work; merge additional on-page comments.
       const result = processThreadData(root, orderComments(nodes, rootId));
       const comments = new Map(result.comments.map((comment) => [comment.id, comment]));
       for (const comment of page.comments) if (!comments.has(comment.id)) comments.set(comment.id, comment);
       result.comments = [...comments.values()];
       const graphComplete = completeAncestry(comments, rootId, 'parent');
-      const complete = pageComplete && graphComplete && (reported === null || result.comments.length >= reported);
-      const missing = reported === null ? null : Math.max(0, reported - result.comments.length);
-      const reason = missing > 0 ? `${missing} commentaire${missing === 1 ? '' : 's'} annoncé${missing === 1 ? '' : 's'} par Reddit n’${missing === 1 ? 'a' : 'ont'} pas été renvoyé${missing === 1 ? '' : 's'} après la collecte automatique.`
-        : page.coverage?.reason || partialReason;
-      result.coverage = { ...result.coverage, loaded: result.comments.length, reason: complete ? '' : reason, complete };
+      const total = Math.max(reported ?? 0, page.coverage?.reported ?? 0) || (reported === 0 ? 0 : null);
+      // Neither transport needs to contain the entire thread by itself. A fully
+      // explored page and a complete merged graph can finish each other's work.
+      const complete = (pageComplete || page.coverage?.exhausted === true) && graphComplete &&
+        total !== null && result.comments.length >= total && [...required].every((name) => comments.has(name));
+      const missing = total === null ? null : Math.max(0, total - result.comments.length);
+      const reasons = [problem, ...errors, collectionError, page.coverage?.diagnostic ?? page.coverage?.reason].filter(Boolean);
+      if (missing > 0) reasons.push(`${missing} commentaire${missing === 1 ? '' : 's'} annoncé${missing === 1 ? '' : 's'} par Reddit reste${missing === 1 ? '' : 'nt'} non récupéré${missing === 1 ? '' : 's'} après la collecte automatique.`);
+      result.coverage = { ...result.coverage, ...page.coverage, source: 'json+page', reported: total,
+        loaded: result.comments.length, reason: complete ? '' : [...new Set(reasons)].join(' ') || partialReason, complete };
       return result;
     }
     if (!root) throw new Error(collectionError || 'Le chargement automatique n’a pas pu accéder à cette discussion. Recharge Reddit puis réessaie.');
   }
   const complete = !problem && !incomplete && !pending.size && !branches.size && reported !== null && nodes.size >= reported;
-  const reason = problem || (complete ? '' : 'Certains commentaires signalés par Reddit ne sont pas accessibles dans les données reçues.');
-  return processThreadData(root, orderComments(nodes, rootId), { complete, reason });
+  const reason = complete ? '' : [problem, ...errors, 'Certains commentaires signalés par Reddit ne sont pas accessibles dans les données reçues.'].filter(Boolean).join(' ');
+  return processThreadData(root, orderComments(nodes, rootId), { complete, reason, requests, unresolved: unresolvedIds().length + unresolvedBranches.size });
 }
 
 export function sourceMap(thread) {
