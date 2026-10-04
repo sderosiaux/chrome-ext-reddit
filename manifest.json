@@ -16,7 +16,8 @@
     "https://new.reddit.com/*",
     "https://reddit.com/*",
     "https://api.openai.com/*",
-    "https://api.anthropic.com/*"
+    "https://api.anthropic.com/*",
+    "https://api.github.com/*"
   ],
 
   "background": {
@@ -39,6 +40,10 @@
       "design-system.css",
       "diagrams.js",
       "diagrams.css",
+      "archive.js",
+      "github-archive.js",
+      "github-archive-ui.js",
+      "github-archive.css",
       "api_client.js",
       "prompts.js",
       "markdown.js",

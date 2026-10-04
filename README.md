@@ -14,6 +14,14 @@ Aucune compilation, dépendance ou serveur n’est nécessaire pour utiliser l�
 
 [Exemple de discussion](https://www.reddit.com/r/ExperiencedDevs/comments/1wo8160/struggling_with_moral_implications_of_ai/).
 
+## Archives GitHub
+
+**Archiver sur GitHub** enregistre la synthèse approfondie si elle est déjà terminée, sinon la courte. Le bouton consulte les notes en mémoire et le cache correspondant à la discussion, aux sources et aux paramètres actuels, quel que soit l’onglet affiché. Il ne lance aucune génération et exclut les Q/R, brouillons et notes préparatoires.
+
+Le dépôt proposé est `sderosiaux/saved-youtube-hackernews-reddit-summaries`, commun aux trois extensions. Le premier clic ouvre la configuration, également accessible dans **Paramètres → Archives GitHub**. Renseigner un [jeton GitHub à accès limité](https://github.com/settings/personal-access-tokens/new), autorisé sur ce dépôt avec **Contents: Read and write**. Le même jeton peut être saisi dans les trois extensions ; la connexion de la CLI `gh` n’est pas partagée avec Chrome. Le jeton reste en session, ou sur cet appareil si demandé, jamais dans Chrome Sync. Recharger l’extension pour activer la nouvelle autorisation `api.github.com`.
+
+Chaque clic crée ou actualise `reddit/<id>.md` via l’API GitHub, sur la branche par défaut ou celle configurée. Le Markdown conserve titre, URL, niveau, langue, références, diagrammes Mermaid et indications de couverture partielle. Un contenu identique ne crée pas de commit ; une version courte ne remplace pas une archive approfondie. Un fichier non créé par les extensions n’est pas écrasé. Un lien vers le fichier apparaît après l’archivage.
+
 ## Lecture
 
 - **Focus automatique sur Reddit** : à l’ouverture d’un thread, les barres du haut, de gauche et de droite, le champ de réponse et les actions (votes, Reply, Award, partage, menus) sont masqués. Le post et les commentaires sont recentrés, dans le thème Reddit actuel. Le tri, la recherche et les commandes pour déplier ou charger les réponses restent disponibles. La navigation habituelle revient en quittant le thread, y compris sans rechargement. Fonctionne sans clé API et sans ouvrir Distill.

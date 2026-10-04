@@ -11,7 +11,7 @@ nav button[aria-selected="true"] { color: var(--accent); border-bottom-color: va
 .segments { display: flex; padding: 3px; background: var(--soft); border-radius: var(--radius); font-size: 12px; }
 .segments button { padding: 5px 8px; color: var(--muted); }
 .segments button[aria-pressed="true"] { background: var(--paper); color: var(--accent); border-color: var(--line); }
-.actions { display: flex; align-items: center; gap: 3px; margin-left: auto; padding-bottom: 4px; font-size: 12px; }
+.actions { display: flex; flex-wrap: wrap; align-items: center; gap: 3px; margin-left: auto; padding-bottom: 4px; font-size: 12px; }
 .actions select { border: 0; background: transparent; padding: 6px; max-width: 105px; }
 #copy-button { background: var(--soft); font-weight: 600; }
 main { flex: 1; min-height: 0; overflow-y: auto; scrollbar-gutter: stable; padding: 28px 32px 48px; }

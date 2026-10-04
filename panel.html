@@ -7,6 +7,7 @@
   <link rel="stylesheet" href="design-system.css">
   <link rel="stylesheet" href="panel.css">
   <link rel="stylesheet" href="diagrams.css">
+  <link rel="stylesheet" href="github-archive.css">
 </head>
 <body>
   <header class="header">
@@ -27,6 +28,7 @@
       </div>
       <div class="actions">
         <button id="stop-button" hidden>Arrêter</button>
+        <button id="archive-button" disabled>Archiver sur GitHub</button>
         <select id="copy-format" aria-label="Format de copie"><option value="markdown">Markdown</option><option value="text">Texte</option></select>
         <button id="copy-button" disabled>Copier</button>
       </div>
@@ -54,7 +56,7 @@
       <label for="personal-context">Ce qui m’aide à comprendre <span class="hint">(facultatif)</span></label>
       <textarea id="personal-context" rows="3" placeholder="Mon expérience, les notions qui me sont familières…"></textarea>
       <p id="settings-error" role="alert" hidden></p>
-      <div class="settings-tools"><button type="button" id="forget-key">Effacer cette clé</button><button type="button" id="clear-cache">Effacer les notes enregistrées</button></div>
+      <div class="settings-tools"><button type="button" id="forget-key">Effacer cette clé</button><button type="button" id="clear-cache">Effacer les notes enregistrées</button><button type="button" id="archive-settings">Archives GitHub</button></div>
       <div class="dialog-actions"><button type="submit" class="primary">Enregistrer</button></div>
     </form>
   </dialog>

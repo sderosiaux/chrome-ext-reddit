@@ -1,0 +1,21 @@
+.github-archive-feedback { flex-shrink: 0; padding: 8px 24px; font-size: 12px; line-height: 1.4; overflow-wrap: anywhere; color: var(--muted); }
+.github-archive-feedback a { color: var(--accent); text-underline-offset: 3px; }
+#archive-button { white-space: nowrap; }
+.github-archive-dialog { box-sizing: border-box; width: min(480px, calc(100vw - 32px)); max-height: calc(100dvh - 40px); padding: 24px; overflow: auto; border: 1px solid var(--line); border-radius: 12px; background: var(--paper); color: var(--ink); font: 14px/1.5 -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+.github-archive-dialog::backdrop { background: #0006; }
+.github-archive-dialog * { box-sizing: border-box; }
+.github-archive-dialog form { border: 0; border-radius: 0; padding: 0; margin: 0; background: transparent; box-shadow: none; }
+.github-dialog-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.github-dialog-heading h2 { margin: 0; font-size: 20px; }
+.github-archive-dialog button { border: 1px solid var(--line); border-radius: 7px; padding: 7px 12px; background: var(--paper); color: var(--ink); font: inherit; cursor: pointer; }
+.github-archive-dialog button:hover { background: var(--wash, var(--soft)); }
+.github-archive-dialog button:disabled { opacity: .5; cursor: default; }
+.github-archive-dialog label { display: block; margin: 16px 0 6px; font-weight: 600; }
+.github-archive-dialog label span, .github-archive-dialog p { color: var(--muted); }
+.github-archive-dialog input:not([type=checkbox]) { width: 100%; padding: 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--paper); color: var(--ink); font: inherit; }
+.github-archive-dialog .github-checkbox { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 400; }
+.github-archive-dialog .github-hint { font-size: 12px; }
+.github-archive-dialog a { color: var(--accent); }
+.github-archive-dialog [data-error] { color: var(--danger, var(--error)); }
+.github-dialog-actions { display: flex; justify-content: space-between; gap: 12px; margin-top: 24px; }
+.github-archive-dialog [type=submit] { font-weight: 600; }
