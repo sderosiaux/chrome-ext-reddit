@@ -11,11 +11,34 @@ const partial = (id = 'one') => `<faceplate-partial id="${id}" src="/svc/shreddi
 function fixture(html, url = href) {
   const dom = new JSDOM(html, { url, runScripts: 'outside-only' });
   const { window } = dom;
-  const now = Date.now;
-  const start = now();
-  window.Date.now = () => start + (now() - start) * 100;
-  const timer = window.setTimeout.bind(window);
-  window.setTimeout = (fn, ms, ...args) => timer(fn, Math.max(1, ms / 100), ...args);
+  // Virtual clock: time moves only when a loader timer fires, straight to its due
+  // time, earliest first. The idle (5 s) and total (30 s) budgets then depend on
+  // the loader's own waits, never on how fast the machine runs jsdom. A clock
+  // scaled from real time left ~12 ms of real slack and failed on CI runners.
+  // Each virtual timer still yields one real macrotask, so mocks that settle via
+  // setImmediate or microtasks complete before time advances.
+  let clock = Date.now(), seq = 0, pump = null;
+  const timers = new Map();
+  const schedule = () => {
+    if (pump || !timers.size) return;
+    pump = setTimeout(() => {
+      pump = null;
+      let next;
+      for (const entry of timers) if (!next || entry[1].due < next[1].due) next = entry;
+      if (!next) return; // Every pending timer was cleared meanwhile.
+      timers.delete(next[0]);
+      clock = Math.max(clock, next[1].due);
+      schedule();
+      next[1].fn(...next[1].args);
+    }, 1);
+  };
+  window.Date.now = () => clock;
+  window.setTimeout = (fn, ms = 0, ...args) => {
+    timers.set(++seq, { due: clock + Math.max(0, Number(ms) || 0), fn, args });
+    schedule();
+    return seq;
+  };
+  window.clearTimeout = (id) => { timers.delete(id); };
   window.scrollTo = () => {};
   for (const script of scripts) window.eval(script);
   return { dom, window, doc: window.document, collect: (opts) => window.RedditDistillLoader.collect({ threadId: 't3_post1', ...opts }) };
