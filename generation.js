@@ -1,4 +1,4 @@
-import { partitionThread, sourceMap } from './data.js';
+import { opFlag, partitionThread, sourceMap } from './data.js';
 import { buildRedditAnalysisPrompt } from './prompts.js';
 import { generate } from './api_client.js';
 import { AnalysisError, partialAnalysis, validateAnalysis } from './analysis.js';
@@ -21,7 +21,7 @@ export async function analyzeThread({ thread, settings, mode, signal = new Abort
     throw new Error('Le contexte personnel est trop volumineux pour ce modèle. Réduis-le dans les paramètres avant de relancer.');
   const partitionBudget = Math.min(payloadBudget, settings.provider === 'claude' ? 100_000 : 160_000);
   const direct = { comments: [...all.values()].filter((c) => c.text || (c.id === thread.id && thread.title)).map((c) => ({
-    id: c.id, parent: c.parent || null, author: c.author, text: c.text,
+    id: c.id, parent: c.parent || null, ...opFlag(thread, c), text: c.text,
     ...(c.id === thread.id ? { title: thread.title } : {}),
   })) };
   if (!direct.comments.length) throw new Error('Cette discussion ne contient pas encore de texte à analyser.');

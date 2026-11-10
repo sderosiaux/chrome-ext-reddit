@@ -310,6 +310,10 @@ export async function fetchThread(threadId, { signal, onProgress = () => {}, onS
   return processThreadData(root, orderComments(nodes, rootId), { complete, reason, requests, unresolved: unresolvedIds().length + unresolvedBranches.size });
 }
 
+// Pseudonyms never reach the model: readers don't know these people, and sources
+// already link every idea to its comments. Only the submitter's role carries meaning.
+export const opFlag = (thread, node) => (thread.author && node.author === thread.author ? { op: true } : {});
+
 export function sourceMap(thread) {
   return new Map([[thread.id, { ...thread, parent: null }], ...thread.comments.map((c) => [c.id, c])]);
 }
@@ -354,7 +358,7 @@ export function partitionThread(thread, budget = 160_000) {
     }
     const branchId = node.id === thread.id ? thread.id : path[1] || node.id;
     if (!branches.has(branchId)) branches.set(branchId, []);
-    const metadata = { id: node.id, parent: node.parent || null, ancestors: path, author: node.author };
+    const metadata = { id: node.id, parent: node.parent || null, ancestors: path, ...opFlag(thread, node) };
     // Reserve continuation:false, the longer of the two flags, before slicing.
     const metadataBytes = jsonBytes({ ...metadata, text: '', continuation: false });
     const partBudget = Math.min(Math.floor(budget / 4), recordBudget - envelopeBytes - metadataBytes);
@@ -382,7 +386,7 @@ export function partitionThread(thread, budget = 160_000) {
     for (const id of parents) {
       if (present.has(id)) continue;
       const parent = all.get(id);
-      const entry = { id, parent: parent.parent || null, author: parent.author, excerpt: [...(nodeText(parent) || '')].slice(0, 1200).join('') };
+      const entry = { id, parent: parent.parent || null, ...opFlag(thread, parent), excerpt: [...(nodeText(parent) || '')].slice(0, 1200).join('') };
       const addedBytes = jsonBytes(entry) + (context.length ? 1 : 0);
       if (payloadBytes + addedBytes <= budget) { context.push(entry); payloadBytes += addedBytes; }
     }

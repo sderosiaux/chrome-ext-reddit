@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { analyzeThread } from '../generation.js';
 import { generate, readEvents } from '../api_client.js';
+import { partitionThread } from '../data.js';
 
 const settings = { provider: 'openai', apiKey: 'test-key', language: 'fr', detail: 'short', personalContext: '' };
 const thread = {
@@ -61,6 +62,21 @@ test('a title-only post remains a valid source', async (t) => {
     return completed(result(titleOnly.id));
   });
   assert.deepEqual(await analyzeThread({ thread: titleOnly, settings, mode: 'summary' }), result(titleOnly.id));
+});
+
+test('pseudonyms never reach the model; only the submitter is flagged', async (t) => {
+  const withReply = { ...thread, comments: [...thread.comments, { id: 't1_ghi', parent: 't1_def', author: 'op', text: 'OP answers.' }] };
+  mockFetch(t, async (_, options) => {
+    const { input } = requestContents(options);
+    assert.ok(!JSON.stringify(input).includes('"author"'));
+    assert.ok(!JSON.stringify(input).includes('"reader"'));
+    assert.deepEqual(input.comments.map((c) => c.op === true), [true, false, true]);
+    return completed(result());
+  });
+  await analyzeThread({ thread: withReply, settings, mode: 'summary' });
+  const parts = partitionThread(withReply, 2_000);
+  assert.ok(!JSON.stringify(parts).includes('"author"'));
+  assert.deepEqual(parts.flatMap((p) => p.comments).filter((c) => c.op).map((c) => c.id), ['t3_abc', 't1_ghi']);
 });
 
 test('direct generation sends fullnames, coverage and the Reddit output schema', async (t) => {

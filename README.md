@@ -25,10 +25,10 @@ Chaque clic crée ou actualise `reddit/<id>.md` via l’API GitHub, sur la branc
 ## Lecture
 
 - **Focus automatique sur Reddit** : à l’ouverture d’un thread, les barres du haut, de gauche et de droite, le champ de réponse et les actions (votes, Reply, Award, partage, menus) sont masqués. Le post et les commentaires sont recentrés, dans le thème Reddit actuel. Le tri, la recherche et les commandes pour déplier ou charger les réponses restent disponibles. La navigation habituelle revient en quittant le thread, y compris sans rechargement. Fonctionne sans clé API et sans ouvrir Distill.
-- **Synthèse** : arguments, objections, témoignages et interprétations, organisés selon le contenu du fil.
+- **Synthèse** : arguments, objections, témoignages et interprétations, organisés selon le contenu du fil. Le libellé de chaque idée porte son statut, sans précautions génériques répétées. Aucun pseudonyme dans le texte (ils ne sont pas transmis au modèle ; seul l’auteur du post est signalé) : les sources de chaque idée suffisent.
 - **Questions-réponses** : un parcours par sujet, avec les positions opposées dans leur contexte.
 - **Discussion** : post et commentaires récupérés, avec les messages parents et les liens d’origine.
-- **Courte / Approfondie** : aperçu concis par défaut ; explications plus développées sur demande.
+- **Courte / Approfondie** : aperçu concis par défaut ; sur demande, davantage d’idées, de mécanismes, de conditions, de chiffres et d’objections — de l’information, pas du récit de l’échange.
 - **Sources** : références contrôlées contre les identifiants réellement fournis au modèle, consultables dans le lecteur ou sur Reddit. Une référence valide ne prouve pas la véracité d’une affirmation.
 - **Copier** : notes ou discussion en Markdown ou texte. Les exports signalent aussi les fils partiellement récupérés et les générations interrompues.
 - **Actualiser** : relire le fil et les commentaires nouvellement chargés. Fermer puis rouvrir le lecteur relit également les données.
